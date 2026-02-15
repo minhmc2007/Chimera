@@ -64,7 +64,6 @@ class ChimeraInstaller:
         self.args = args
         self.uefi = os.path.exists("/sys/firmware/efi")
         self.target_os = args.target.lower()
-        # If --disk is used, self.disk is the whole device. Otherwise, it's inferred.
         self.disk = args.disk if args.disk else self._detect_disk(args.rootfs)
         self.arch_keyring_initialized = False
 
@@ -109,7 +108,6 @@ class ChimeraInstaller:
         if self.args.disk:
             print(f"\n{COLORS['FAIL']}!!!!!!!!!! WARNING: AUTOMATED DISK MODE !!!!!!!!!!{COLORS['ENDC']}")
             print(f"{COLORS['FAIL']}THE ENTIRE DISK {self.args.disk} WILL BE WIPED AND REPARTITIONED.{COLORS['ENDC']}")
-            print(f"{COLORS['FAIL']}ALL EXISTING DATA WILL BE PERMANENTLY DESTROYED.{COLORS['ENDC']}")
         else:
             print(f"\n{COLORS['FAIL']}WARNING: DESTRUCTIVE OPERATION{COLORS['ENDC']}")
             if self.args.rootfs: print(f"  - Root: {self.args.rootfs} (Format EXT4)")
@@ -131,11 +129,9 @@ class ChimeraInstaller:
         run_cmd(["umount", "-R", MOUNT_POINT], check=False, ignore_error=True)
         os.makedirs(MOUNT_POINT, exist_ok=True)
         
-        # New automated partitioning logic
         if self.args.disk:
             self._auto_partition_disk()
 
-        # Formatting and mounting (works for both manual and auto modes)
         if self.args.swap:
             run_cmd(["swapoff", self.args.swap], check=False, ignore_error=True)
             run_cmd(["mkswap", self.args.swap])
@@ -145,100 +141,63 @@ class ChimeraInstaller:
         run_cmd(["mount", self.args.rootfs, MOUNT_POINT])
         
         if self.args.boot:
-            # Filesystem formatting for boot is now inside _auto_partition_disk
-            # This block now just handles mounting
             path = f"{MOUNT_POINT}/boot/efi" if self.uefi else f"{MOUNT_POINT}/boot"
             os.makedirs(path, exist_ok=True)
             run_cmd(["mount", self.args.boot, path])
 
     def _auto_partition_disk(self):
         log(f"Wiping and partitioning {self.args.disk}...", "warn")
-        
-        # Determine partition table type based on boot mode
         label_type = "gpt" if self.uefi else "msdos"
-        log(f"Using '{label_type}' partition table for {self.disk}", "info")
-        
-        # Wipe existing signatures and create new label
         run_cmd(["wipefs", "--all", self.disk])
         run_cmd(["parted", "-s", self.disk, "mklabel", label_type])
         
-        # Define partition layout
-        boot_part_num = 1
         boot_part_end = "513MiB"
-        
-        # Create Boot Partition
         run_cmd(["parted", "-s", self.disk, "mkpart", "primary", "1MiB", boot_part_end])
-        
         current_end = boot_part_end
-        swap_part_num = None
-        root_part_num = 2
         
-        # Create Swap Partition (if requested)
         if self.args.swap:
-            swap_part_num = 2
-            root_part_num = 3
-            swap_size = self.args.swap
-            log(f"Creating {swap_size} swap partition...", "info")
-            run_cmd(["parted", "-s", self.disk, "mkpart", "primary", current_end, f"calc(100% - {current_end} - {swap_size})"])
-            current_end = f"calc(100% - {current_end} - {swap_size})" # Incorrect logic, parted mkpart needs start, end
-            # Let's use a simpler, more robust approach
-            # We need to calculate the end position for swap
-            # Simpler: Boot, Swap, Root (rest)
-            swap_end_calc = f"calc(100% - {boot_part_end} + {swap_size})" # still not right
-            # Let's do it sequentially
-            swap_end = f"$(echo $(parted {self.disk} unit MiB print free | tail -n 2 | head -n 1 | awk '{{print $1}}') + $(numfmt --from=auto {swap_size}) | bc)MiB"
-            # This is getting too complex and fragile for shell. Let's simplify.
-            # Boot: 1-513MiB. Swap: 513MiB - (513MiB + Size). Root: (513MiB + Size) - 100%
-            swap_start = boot_part_end
-            run_cmd(f'parted -s {self.disk} mkpart primary linux-swap {swap_start} "$(echo {swap_start} | sed "s/MiB//") + $(numfmt --from=auto {swap_size}) / 1024 / 1024"s', shell=True)
-            # Above is still too complex. Let's use parted's own features.
             swap_start_mb = 513
-            swap_size_mb = int(subprocess.check_output(f"numfmt --from=auto {self.args.swap}", shell=True).decode()) // 1024 // 1024
+            # numfmt is a great tool but might not be on all live ISOs, let's parse manually for portability
+            swap_size_str = self.args.swap.upper()
+            multiplier = 1
+            if swap_size_str.endswith('G'): multiplier = 1024
+            elif swap_size_str.endswith('M'): multiplier = 1
+            swap_size_mb = int(swap_size_str.rstrip('GM')) * multiplier
             swap_end_mb = swap_start_mb + swap_size_mb
             
             run_cmd(["parted", "-s", self.disk, "mkpart", "primary", f"{swap_start_mb}MiB", f"{swap_end_mb}MiB"])
             current_end = f"{swap_end_mb}MiB"
 
-        # Create Root Partition (rest of the disk)
         run_cmd(["parted", "-s", self.disk, "mkpart", "primary", current_end, "100%"])
         
-        # Set flags
+        p_suffix = "p" if "nvme" in self.disk or "mmc" in self.disk else ""
+        boot_part_num = 1
+        swap_part_num = 2 if self.args.swap else None
+        root_part_num = 3 if self.args.swap else 2
+
         if self.uefi:
             run_cmd(["parted", "-s", self.disk, "set", str(boot_part_num), "esp", "on"])
         else: # BIOS
             run_cmd(["parted", "-s", self.disk, "set", str(boot_part_num), "boot", "on"])
             
-        # Let kernel re-read the table
         run_cmd(["partprobe", self.disk])
-        time.sleep(2) # Give udev time to create device nodes
+        time.sleep(2)
 
-        # Determine partition suffix ('p' for nvme/mmc, empty for sata)
-        p_suffix = "p" if "nvme" in self.disk or "mmc" in self.disk else ""
-        
-        # Update self.args with the new paths
         self.args.boot = f"{self.disk}{p_suffix}{boot_part_num}"
-        if swap_part_num:
-            self.args.swap = f"{self.disk}{p_suffix}{swap_part_num}"
+        if swap_part_num: self.args.swap = f"{self.disk}{p_suffix}{swap_part_num}"
         self.args.rootfs = f"{self.disk}{p_suffix}{root_part_num}"
         
         log(f"New Layout: Boot={self.args.boot}, Swap={self.args.swap}, Root={self.args.rootfs}", "success")
         
-        # Format the newly created partitions
-        log("Formatting new partitions...", "info")
-        if self.uefi:
-            run_cmd(["mkfs.vfat", "-F32", self.args.boot])
-        else:
-            run_cmd(["mkfs.ext4", "-F", self.args.boot])
+        if self.uefi: run_cmd(["mkfs.vfat", "-F32", self.args.boot])
+        else: run_cmd(["mkfs.ext4", "-F", self.args.boot])
         run_cmd(["sync"])
 
     def install_base(self):
-        # ... (rest of the script is unchanged) ...
         if self.target_os == "gentoo": self._install_gentoo_stage3()
         else:
             log(f"Cloning live system (Mode: {self.target_os})...", "info")
-            excludes = ["--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*", 
-                        "--exclude=/run/*", "--exclude=/tmp/*", "--exclude=/mnt/*", 
-                        f"--exclude={MOUNT_POINT}/*"]
+            excludes = ["--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*", "--exclude=/run/*", "--exclude=/tmp/*", "--exclude=/mnt/*", f"--exclude={MOUNT_POINT}/*"]
             subprocess.run(["rsync", "-axHAWXS", "--numeric-ids", "--info=progress2"] + excludes + ["/", MOUNT_POINT], check=False)
 
     def _install_gentoo_stage3(self):
@@ -364,18 +323,19 @@ class ChimeraInstaller:
 
 # --- Entry Point ---
 def main():
-    parser = argparse.ArgumentParser(description="Chimera: A Universal Linux Installer")
+    parser = argparse.ArgumentParser(
+        description="Chimera: A Universal Linux Installer",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
     
-    # Mode groups: User can either specify a whole disk OR manual partitions
-    mode_group = parser.add_mutually_exclusive_group(required=True)
-    mode_group.add_argument("--disk", help="Path to the disk to auto-partition (e.g., /dev/sda). Wipes the entire disk.")
-    
-    manual_group = mode_group.add_argument_group('manual', 'Manual Partitioning')
-    manual_group.add_argument("--boot", help="Path to boot partition")
-    manual_group.add_argument("--rootfs", help="Path to root partition")
+    # --- FIX: Simplified argparse structure ---
+    # Define installation modes
+    parser.add_argument("--disk", help="Automated Mode: Path to the disk to wipe and auto-partition (e.g., /dev/sda).")
+    parser.add_argument("--boot", help="Manual Mode: Path to pre-existing boot partition.")
+    parser.add_argument("--rootfs", help="Manual Mode: Path to pre-existing root partition.")
 
     # General options
-    parser.add_argument("--swap", help="Size for swap partition in auto mode (e.g., 2G) or path in manual mode.")
+    parser.add_argument("--swap", help="Size for swap in auto mode (e.g., 2G) or path in manual mode.")
     parser.add_argument("--target", default="arch", choices=["arch", "gentoo", "debian", "void", "generic"])
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--init", choices=["systemd", "openrc"])
@@ -385,9 +345,12 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate arguments
+    # --- FIX: Manual validation of modes ---
+    if args.disk and (args.boot or args.rootfs):
+        parser.error("Cannot use --disk with manual partitioning flags (--boot, --rootfs).")
+    
     if not args.disk and (not args.boot or not args.rootfs):
-        parser.error("In manual mode, both --boot and --rootfs are required.")
+        parser.error("You must specify either --disk (for automated install) or both --boot and --rootfs (for manual install).")
 
     if args.tui:
         print("TUI mode not implemented.")
