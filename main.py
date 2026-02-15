@@ -77,7 +77,6 @@ class ChimeraInstaller:
         self.uefi = os.path.exists("/sys/firmware/efi")
         self.target_os = args.target.lower()
         self.disk = self._detect_disk(args.rootfs)
-        # State flag to prevent re-initializing keyring
         self.arch_keyring_initialized = False
 
     def _detect_disk(self, partition):
@@ -141,7 +140,6 @@ class ChimeraInstaller:
     def partition_handler(self):
         log("Preparing Partitions...", "info")
         run_cmd(["umount", "-R", MOUNT_POINT], check=False, ignore_error=True)
-        # FIX: Ensure mountpoint exists before trying to mount to it
         os.makedirs(MOUNT_POINT, exist_ok=True)
         if self.args.swap:
             run_cmd(["swapoff", self.args.swap], check=False, ignore_error=True)
@@ -152,10 +150,21 @@ class ChimeraInstaller:
         if self.args.boot:
             fstype = get_blk_value(self.args.boot, "FSTYPE")
             should_format = True
-            if fstype == "vfat" and not self.args.i_am_very_stupid:
-                if input(f"{COLORS['WARN']}{self.args.boot} is FAT32. Format it? (y/N): {COLORS['ENDC']}").lower() != 'y':
+            if fstype in ["vfat", "ext4"] and not self.args.i_am_very_stupid:
+                if input(f"{COLORS['WARN']}{self.args.boot} has a filesystem. Format it? (y/N): {COLORS['ENDC']}").lower() != 'y':
                     should_format = False
-            if should_format: run_cmd(["mkfs.vfat", "-F32", self.args.boot])
+            if should_format:
+                # --- FIX: Use correct filesystem for the boot mode ---
+                if self.uefi:
+                    log("UEFI mode: Formatting boot partition as FAT32.", "info")
+                    run_cmd(["mkfs.vfat", "-F32", self.args.boot])
+                else:
+                    log("BIOS mode: Formatting boot partition as EXT4.", "info")
+                    run_cmd(["mkfs.ext4", "-F", self.args.boot])
+                
+                run_cmd(["sync"])
+            
+            # Mount logic is now universal, path determines where it goes.
             path = f"{MOUNT_POINT}/boot/efi" if self.uefi else f"{MOUNT_POINT}/boot"
             os.makedirs(path, exist_ok=True)
             run_cmd(["mount", self.args.boot, path])
@@ -223,7 +232,6 @@ class ChimeraInstaller:
             self._emergency_install_kernel()
 
     def _initialize_arch_keyring(self):
-        """Initializes the pacman keyring to allow package validation."""
         if self.arch_keyring_initialized: return
         log("Arch Linux detected. Initializing pacman keyring...", "info")
         run_cmd("pacman-key --init", chroot=True)
@@ -253,7 +261,10 @@ class ChimeraInstaller:
                 f.write(f"UUID={root_uuid} / ext4 defaults 0 1\n")
                 if self.args.boot:
                     boot_uuid = get_blk_value(self.args.boot, 'UUID')
-                    if boot_uuid: f.write(f"UUID={boot_uuid} {'/boot/efi' if self.uefi else '/boot'} vfat defaults 0 2\n")
+                    if boot_uuid:
+                        fs_type = "vfat" if self.uefi else "ext4"
+                        mount_point = '/boot/efi' if self.uefi else '/boot'
+                        f.write(f"UUID={boot_uuid} {mount_point} {fs_type} defaults 0 2\n")
                 if self.args.swap:
                     swap_uuid = get_blk_value(self.args.swap, 'UUID')
                     if swap_uuid: f.write(f"UUID={swap_uuid} none swap defaults 0 0\n")
