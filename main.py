@@ -157,7 +157,6 @@ class ChimeraInstaller:
         
         if self.args.swap:
             swap_start_mb = 513
-            # numfmt is a great tool but might not be on all live ISOs, let's parse manually for portability
             swap_size_str = self.args.swap.upper()
             multiplier = 1
             if swap_size_str.endswith('G'): multiplier = 1024
@@ -177,7 +176,7 @@ class ChimeraInstaller:
 
         if self.uefi:
             run_cmd(["parted", "-s", self.disk, "set", str(boot_part_num), "esp", "on"])
-        else: # BIOS
+        else: 
             run_cmd(["parted", "-s", self.disk, "set", str(boot_part_num), "boot", "on"])
             
         run_cmd(["partprobe", self.disk])
@@ -237,6 +236,11 @@ class ChimeraInstaller:
     def configure_system(self):
         log("Configuring System...", "info")
         self._gen_fstab()
+        
+        # --- FIX: Sanitize Arch/Generic-Arch Initramfs ---
+        if os.path.exists(f"{MOUNT_POINT}/usr/bin/mkinitcpio"):
+            self._fix_arch_initramfs()
+
         if self.target_os == "generic": return
         if self.target_os == "gentoo":
             log("Gentoo: Installing Kernel & Firmware...", "info")
@@ -252,6 +256,21 @@ class ChimeraInstaller:
         if not self._kernel_exists() and check_connection():
             log("WARNING: No Kernel detected in /boot!", "warn")
             self._emergency_install_kernel()
+
+    # --- FIX: New method to remove archiso hooks and rebuild ---
+    def _fix_arch_initramfs(self):
+        log("Sanitizing initramfs for physical disk boot...", "info")
+        
+        # 1. Remove the ISO-specific drop-in config
+        iso_conf = f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf"
+        if os.path.exists(iso_conf):
+            log(f"Removing live media config: {iso_conf}", "success")
+            os.remove(iso_conf)
+        
+        # 2. Rebuild the images (using the clean /etc/mkinitcpio.conf)
+        log("Rebuilding initramfs (this may take a moment)...", "info")
+        if not run_cmd("mkinitcpio -P", chroot=True):
+            log("Failed to rebuild initramfs.", "error")
 
     def _initialize_arch_keyring(self):
         if self.arch_keyring_initialized: return
@@ -323,18 +342,10 @@ class ChimeraInstaller:
 
 # --- Entry Point ---
 def main():
-    parser = argparse.ArgumentParser(
-        description="Chimera: A Universal Linux Installer",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    
-    # --- FIX: Simplified argparse structure ---
-    # Define installation modes
+    parser = argparse.ArgumentParser(description="Chimera: A Universal Linux Installer")
     parser.add_argument("--disk", help="Automated Mode: Path to the disk to wipe and auto-partition (e.g., /dev/sda).")
     parser.add_argument("--boot", help="Manual Mode: Path to pre-existing boot partition.")
     parser.add_argument("--rootfs", help="Manual Mode: Path to pre-existing root partition.")
-
-    # General options
     parser.add_argument("--swap", help="Size for swap in auto mode (e.g., 2G) or path in manual mode.")
     parser.add_argument("--target", default="arch", choices=["arch", "gentoo", "debian", "void", "generic"])
     parser.add_argument("--online", action="store_true")
@@ -345,7 +356,6 @@ def main():
     
     args = parser.parse_args()
     
-    # --- FIX: Manual validation of modes ---
     if args.disk and (args.boot or args.rootfs):
         parser.error("Cannot use --disk with manual partitioning flags (--boot, --rootfs).")
     
