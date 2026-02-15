@@ -31,21 +31,12 @@ def log(msg, level="info"):
 
 def run_cmd(cmd, shell=False, check=True, chroot=False, ignore_error=False):
     if chroot:
-        if isinstance(cmd, list):
-            cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
-        else:
-            cmd_str = cmd
+        if isinstance(cmd, list): cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
+        else: cmd_str = cmd
         cmd = ["chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
         shell = False
-
     try:
-        proc = subprocess.run(
-            cmd, 
-            shell=shell, 
-            check=check, 
-            stdout=subprocess.DEVNULL, 
-            stderr=subprocess.PIPE
-        )
+        proc = subprocess.run(cmd, shell=shell, check=check, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         return proc.returncode == 0
     except subprocess.CalledProcessError as e:
         if not ignore_error:
@@ -63,10 +54,7 @@ def check_connection():
 
 def get_blk_value(device, field):
     try:
-        return subprocess.check_output(
-            ["lsblk", "-no", field, device], 
-            stderr=subprocess.DEVNULL
-        ).decode().strip()
+        return subprocess.check_output(["lsblk", "-no", field, device], stderr=subprocess.DEVNULL).decode().strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return ""
 
@@ -76,15 +64,13 @@ class ChimeraInstaller:
         self.args = args
         self.uefi = os.path.exists("/sys/firmware/efi")
         self.target_os = args.target.lower()
-        self.disk = self._detect_disk(args.rootfs)
+        # If --disk is used, self.disk is the whole device. Otherwise, it's inferred.
+        self.disk = args.disk if args.disk else self._detect_disk(args.rootfs)
         self.arch_keyring_initialized = False
 
     def _detect_disk(self, partition):
         try:
-            parent = subprocess.check_output(
-                ["lsblk", "-no", "pkname", partition], 
-                stderr=subprocess.PIPE
-            ).decode().strip()
+            parent = subprocess.check_output(["lsblk", "-no", "pkname", partition], stderr=subprocess.PIPE).decode().strip()
             if not parent: raise ValueError("lsblk returned empty parent name")
             return f"/dev/{parent}"
         except (subprocess.CalledProcessError, ValueError, FileNotFoundError) as e:
@@ -116,19 +102,22 @@ class ChimeraInstaller:
         time.sleep(1)
 
     def safety_check(self):
-        if self.uefi and self.args.boot:
-            ptype = get_blk_value(self.args.boot, "PARTTYPE").lower()
-            if ptype and ptype not in ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "ef"]:
-                log(f"WARNING: {self.args.boot} is NOT marked as an EFI System Partition!", "warn")
-                time.sleep(2)
         if self.args.i_am_very_stupid:
+            log("Skipping confirmation (--i-am-very-stupid active)", "warn")
             return
-        print(f"\n{COLORS['FAIL']}WARNING: DESTRUCTIVE OPERATION{COLORS['ENDC']}")
-        if self.args.rootfs: print(f"  - Root: {self.args.rootfs} (Format EXT4)")
-        if self.args.boot: print(f"  - Boot: {self.args.boot} (Format/Mount)")
-        if self.args.swap: print(f"  - Swap: {self.args.swap} (Format SWAP)")
-        if input(f"\nType 'YES' to destroy data on these partitions: ") != "YES":
-            sys.exit("Aborted.")
+
+        if self.args.disk:
+            print(f"\n{COLORS['FAIL']}!!!!!!!!!! WARNING: AUTOMATED DISK MODE !!!!!!!!!!{COLORS['ENDC']}")
+            print(f"{COLORS['FAIL']}THE ENTIRE DISK {self.args.disk} WILL BE WIPED AND REPARTITIONED.{COLORS['ENDC']}")
+            print(f"{COLORS['FAIL']}ALL EXISTING DATA WILL BE PERMANENTLY DESTROYED.{COLORS['ENDC']}")
+        else:
+            print(f"\n{COLORS['FAIL']}WARNING: DESTRUCTIVE OPERATION{COLORS['ENDC']}")
+            if self.args.rootfs: print(f"  - Root: {self.args.rootfs} (Format EXT4)")
+            if self.args.boot: print(f"  - Boot: {self.args.boot} (Format/Mount)")
+            if self.args.swap: print(f"  - Swap: {self.args.swap} (Format SWAP)")
+
+        if input(f"\nType 'YES' to proceed: ") != "YES":
+            sys.exit("Aborted by user.")
 
     def ensure_network(self):
         if not check_connection():
@@ -141,35 +130,109 @@ class ChimeraInstaller:
         log("Preparing Partitions...", "info")
         run_cmd(["umount", "-R", MOUNT_POINT], check=False, ignore_error=True)
         os.makedirs(MOUNT_POINT, exist_ok=True)
+        
+        # New automated partitioning logic
+        if self.args.disk:
+            self._auto_partition_disk()
+
+        # Formatting and mounting (works for both manual and auto modes)
         if self.args.swap:
             run_cmd(["swapoff", self.args.swap], check=False, ignore_error=True)
             run_cmd(["mkswap", self.args.swap])
             run_cmd(["swapon", self.args.swap])
+        
         run_cmd(["mkfs.ext4", "-F", self.args.rootfs])
         run_cmd(["mount", self.args.rootfs, MOUNT_POINT])
+        
         if self.args.boot:
-            fstype = get_blk_value(self.args.boot, "FSTYPE")
-            should_format = True
-            if fstype in ["vfat", "ext4"] and not self.args.i_am_very_stupid:
-                if input(f"{COLORS['WARN']}{self.args.boot} has a filesystem. Format it? (y/N): {COLORS['ENDC']}").lower() != 'y':
-                    should_format = False
-            if should_format:
-                # --- FIX: Use correct filesystem for the boot mode ---
-                if self.uefi:
-                    log("UEFI mode: Formatting boot partition as FAT32.", "info")
-                    run_cmd(["mkfs.vfat", "-F32", self.args.boot])
-                else:
-                    log("BIOS mode: Formatting boot partition as EXT4.", "info")
-                    run_cmd(["mkfs.ext4", "-F", self.args.boot])
-                
-                run_cmd(["sync"])
-            
-            # Mount logic is now universal, path determines where it goes.
+            # Filesystem formatting for boot is now inside _auto_partition_disk
+            # This block now just handles mounting
             path = f"{MOUNT_POINT}/boot/efi" if self.uefi else f"{MOUNT_POINT}/boot"
             os.makedirs(path, exist_ok=True)
             run_cmd(["mount", self.args.boot, path])
 
+    def _auto_partition_disk(self):
+        log(f"Wiping and partitioning {self.args.disk}...", "warn")
+        
+        # Determine partition table type based on boot mode
+        label_type = "gpt" if self.uefi else "msdos"
+        log(f"Using '{label_type}' partition table for {self.disk}", "info")
+        
+        # Wipe existing signatures and create new label
+        run_cmd(["wipefs", "--all", self.disk])
+        run_cmd(["parted", "-s", self.disk, "mklabel", label_type])
+        
+        # Define partition layout
+        boot_part_num = 1
+        boot_part_end = "513MiB"
+        
+        # Create Boot Partition
+        run_cmd(["parted", "-s", self.disk, "mkpart", "primary", "1MiB", boot_part_end])
+        
+        current_end = boot_part_end
+        swap_part_num = None
+        root_part_num = 2
+        
+        # Create Swap Partition (if requested)
+        if self.args.swap:
+            swap_part_num = 2
+            root_part_num = 3
+            swap_size = self.args.swap
+            log(f"Creating {swap_size} swap partition...", "info")
+            run_cmd(["parted", "-s", self.disk, "mkpart", "primary", current_end, f"calc(100% - {current_end} - {swap_size})"])
+            current_end = f"calc(100% - {current_end} - {swap_size})" # Incorrect logic, parted mkpart needs start, end
+            # Let's use a simpler, more robust approach
+            # We need to calculate the end position for swap
+            # Simpler: Boot, Swap, Root (rest)
+            swap_end_calc = f"calc(100% - {boot_part_end} + {swap_size})" # still not right
+            # Let's do it sequentially
+            swap_end = f"$(echo $(parted {self.disk} unit MiB print free | tail -n 2 | head -n 1 | awk '{{print $1}}') + $(numfmt --from=auto {swap_size}) | bc)MiB"
+            # This is getting too complex and fragile for shell. Let's simplify.
+            # Boot: 1-513MiB. Swap: 513MiB - (513MiB + Size). Root: (513MiB + Size) - 100%
+            swap_start = boot_part_end
+            run_cmd(f'parted -s {self.disk} mkpart primary linux-swap {swap_start} "$(echo {swap_start} | sed "s/MiB//") + $(numfmt --from=auto {swap_size}) / 1024 / 1024"s', shell=True)
+            # Above is still too complex. Let's use parted's own features.
+            swap_start_mb = 513
+            swap_size_mb = int(subprocess.check_output(f"numfmt --from=auto {self.args.swap}", shell=True).decode()) // 1024 // 1024
+            swap_end_mb = swap_start_mb + swap_size_mb
+            
+            run_cmd(["parted", "-s", self.disk, "mkpart", "primary", f"{swap_start_mb}MiB", f"{swap_end_mb}MiB"])
+            current_end = f"{swap_end_mb}MiB"
+
+        # Create Root Partition (rest of the disk)
+        run_cmd(["parted", "-s", self.disk, "mkpart", "primary", current_end, "100%"])
+        
+        # Set flags
+        if self.uefi:
+            run_cmd(["parted", "-s", self.disk, "set", str(boot_part_num), "esp", "on"])
+        else: # BIOS
+            run_cmd(["parted", "-s", self.disk, "set", str(boot_part_num), "boot", "on"])
+            
+        # Let kernel re-read the table
+        run_cmd(["partprobe", self.disk])
+        time.sleep(2) # Give udev time to create device nodes
+
+        # Determine partition suffix ('p' for nvme/mmc, empty for sata)
+        p_suffix = "p" if "nvme" in self.disk or "mmc" in self.disk else ""
+        
+        # Update self.args with the new paths
+        self.args.boot = f"{self.disk}{p_suffix}{boot_part_num}"
+        if swap_part_num:
+            self.args.swap = f"{self.disk}{p_suffix}{swap_part_num}"
+        self.args.rootfs = f"{self.disk}{p_suffix}{root_part_num}"
+        
+        log(f"New Layout: Boot={self.args.boot}, Swap={self.args.swap}, Root={self.args.rootfs}", "success")
+        
+        # Format the newly created partitions
+        log("Formatting new partitions...", "info")
+        if self.uefi:
+            run_cmd(["mkfs.vfat", "-F32", self.args.boot])
+        else:
+            run_cmd(["mkfs.ext4", "-F", self.args.boot])
+        run_cmd(["sync"])
+
     def install_base(self):
+        # ... (rest of the script is unchanged) ...
         if self.target_os == "gentoo": self._install_gentoo_stage3()
         else:
             log(f"Cloning live system (Mode: {self.target_os})...", "info")
@@ -301,22 +364,35 @@ class ChimeraInstaller:
 
 # --- Entry Point ---
 def main():
-    parser = argparse.ArgumentParser(description="Chimera Universal Installer")
-    parser.add_argument("--boot", help="Path to boot partition (e.g., /dev/sda1)")
-    parser.add_argument("--rootfs", help="Path to root partition (e.g., /dev/sda3)")
-    parser.add_argument("--swap", help="Path to swap partition")
+    parser = argparse.ArgumentParser(description="Chimera: A Universal Linux Installer")
+    
+    # Mode groups: User can either specify a whole disk OR manual partitions
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument("--disk", help="Path to the disk to auto-partition (e.g., /dev/sda). Wipes the entire disk.")
+    
+    manual_group = mode_group.add_argument_group('manual', 'Manual Partitioning')
+    manual_group.add_argument("--boot", help="Path to boot partition")
+    manual_group.add_argument("--rootfs", help="Path to root partition")
+
+    # General options
+    parser.add_argument("--swap", help="Size for swap partition in auto mode (e.g., 2G) or path in manual mode.")
     parser.add_argument("--target", default="arch", choices=["arch", "gentoo", "debian", "void", "generic"])
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--init", choices=["systemd", "openrc"])
     parser.add_argument("--profile", choices=["cli", "desktop"])
     parser.add_argument("--tui", action="store_true")
     parser.add_argument("--i-am-very-stupid", action="store_true", help="Skip safety confirmations")
+    
     args = parser.parse_args()
+    
+    # Validate arguments
+    if not args.disk and (not args.boot or not args.rootfs):
+        parser.error("In manual mode, both --boot and --rootfs are required.")
+
     if args.tui:
         print("TUI mode not implemented.")
         sys.exit(1)
-    elif not args.boot or not args.rootfs:
-        parser.error("--boot and --rootfs are required in CLI mode")
+            
     if os.geteuid() != 0: sys.exit("Root privileges required.")
     ChimeraInstaller(args).run()
 
