@@ -7,6 +7,7 @@ import shutil
 import time
 import socket
 import shlex
+import glob
 
 # --- Configuration & Constants ---
 COLORS = {
@@ -36,7 +37,6 @@ def run_cmd(cmd, shell=False, check=True, chroot=False, ignore_error=False, env=
         if shutil.which("arch-chroot"):
             cmd = ["arch-chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
         else:
-            # Fallback for systems without arch-chroot
             cmd = ["chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
         shell = False
     
@@ -71,7 +71,6 @@ class ChimeraInstaller:
         self.target_os = args.target.lower()
         self.disk = args.disk if args.disk else self._detect_disk(args.rootfs)
         
-        # Check dependencies for online modes
         if self.target_os == "arch" and self.args.online and not shutil.which("pacstrap"):
             sys.exit(f"{COLORS['FAIL']}Error: 'pacstrap' not found. Install 'arch-install-scripts'.{COLORS['ENDC']}")
         if self.target_os == "debian" and self.args.online and not shutil.which("debootstrap"):
@@ -92,8 +91,6 @@ class ChimeraInstaller:
             self.ensure_network_logic()
             self.partition_handler()
             self.install_base()
-            # Only setup manual mounts if NOT using arch/debian online tools (which handle it)
-            # OR if we don't have arch-chroot available.
             if self.target_os not in ["arch", "debian"] or not self.args.online: 
                 if not shutil.which("arch-chroot"):
                     self.setup_chroot_mounts()
@@ -147,7 +144,6 @@ class ChimeraInstaller:
         if self.args.disk:
             self._auto_partition_disk()
 
-        # Format/Mount
         run_cmd(["mkfs.ext4", "-F", self.args.rootfs])
         os.makedirs(MOUNT_POINT, exist_ok=True)
         run_cmd(["mount", self.args.rootfs, MOUNT_POINT])
@@ -207,16 +203,12 @@ class ChimeraInstaller:
         elif self.target_os == "debian" and self.args.online:
             self._install_debian_debootstrap()
         elif self.target_os == "gentoo":
-            pass # Gentoo logic placeholder
+            pass 
         else:
-            # Offline Cloning
             log("Mode: Offline/Clone. Running Rsync...", "warn")
-            # Added /run/archiso to excludes to be safe
             excludes = ["--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*", 
                         "--exclude=/run/*", "--exclude=/tmp/*", "--exclude=/mnt/*", 
                         f"--exclude={MOUNT_POINT}/*"]
-            
-            # Rsync the root
             subprocess.run(["rsync", "-axHAWXS", "--numeric-ids", "--info=progress2"] + excludes + ["/", MOUNT_POINT], check=True)
 
     def _install_arch_pacstrap(self):
@@ -249,7 +241,6 @@ class ChimeraInstaller:
     def configure_system(self):
         log("Configuring System...", "info")
         
-        # Hostname
         with open(f"{MOUNT_POINT}/etc/hostname", "w") as f:
             f.write("chimera-linux\n")
             
@@ -263,56 +254,61 @@ class ChimeraInstaller:
             if not self.args.online:
                 log("Offline Mode: Fixing Kernel and Initramfs...", "warn")
                 
-                # 1. Ensure Kernel Exists (Rsync -x often skips /boot contents)
-                kernel_src = "/boot/vmlinuz-linux"
-                kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-linux"
+                # 1. FIND THE KERNEL ON LIVE MEDIA
+                # Arch ISO mounts boot partition to /run/archiso/bootmnt
+                kernel_candidates = [
+                    "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux", # Standard
+                    "/run/archiso/bootmnt/vmlinuz-linux",                  # Alternative
+                    "/boot/vmlinuz-linux"                                  # Fallback
+                ]
                 
-                if not os.path.exists(kernel_dst):
-                    if os.path.exists(kernel_src):
-                        log(f"Copying kernel from {kernel_src}...", "info")
-                        shutil.copy(kernel_src, kernel_dst)
-                    else:
-                        log("WARNING: Could not find kernel in /boot. Proceeding, but mkinitcpio might fail.", "warn")
+                kernel_src = None
+                for candidate in kernel_candidates:
+                    if os.path.exists(candidate):
+                        kernel_src = candidate
+                        break
 
-                # 2. Fix archiso hooks in mkinitcpio.conf
-                # The live ISO has hooks like 'archiso_pxe_common' which fail on real metal.
-                # We need to replace the HOOKS line with a standard one.
+                kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-linux"
+                os.makedirs(os.path.dirname(kernel_dst), exist_ok=True)
+
+                if kernel_src:
+                    log(f"Found kernel at: {kernel_src}", "success")
+                    shutil.copy(kernel_src, kernel_dst)
+                else:
+                    log(f"{COLORS['FAIL']}CRITICAL: Could not find kernel on live media.{COLORS['ENDC']}", "error")
+                    # We continue, but mkinitcpio will likely fail
+
+                # 2. Fix archiso hooks
                 conf_path = f"{MOUNT_POINT}/etc/mkinitcpio.conf"
                 try:
                     with open(conf_path, 'r') as f:
                         config_data = f.read()
                     
-                    # Simple replacement to standard Arch defaults
                     if "archiso" in config_data:
-                        log("Removing archiso hooks from mkinitcpio.conf...", "info")
-                        # Standard hooks for Arch
+                        log("Sanitizing mkinitcpio.conf hooks...", "info")
                         std_hooks = 'HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block filesystems fsck)'
-                        # Regex or simple string manipulation could work.
-                        # Since we are scripting, let's just comment out old hooks and append new ones if we detect archiso
                         lines = config_data.splitlines()
                         new_lines = []
                         for line in lines:
                             if line.strip().startswith("HOOKS") and "archiso" in line:
-                                new_lines.append(f"# {line} # Commented by Chimera")
+                                new_lines.append(f"# {line}")
                                 new_lines.append(std_hooks)
                             else:
                                 new_lines.append(line)
                         
                         with open(conf_path, 'w') as f:
                             f.write("\n".join(new_lines))
-
                 except Exception as e:
                     log(f"Failed to patch mkinitcpio.conf: {e}", "warn")
 
                 # 3. Clean preset junk
                 if os.path.exists(f"{MOUNT_POINT}/etc/mkinitcpio.d/archiso.preset"):
                     os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.d/archiso.preset")
-                
-                # 4. Remove archiso confs
                 if os.path.exists(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf"):
                     os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf")
 
-                # 5. Rebuild
+                # 4. Rebuild
+                log("Rebuilding initramfs...", "info")
                 run_cmd("mkinitcpio -P", chroot=True)
 
         elif self.target_os == "debian":
