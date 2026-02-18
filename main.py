@@ -5,9 +5,7 @@ import argparse
 import subprocess
 import shutil
 import time
-import urllib.request
 import socket
-import glob
 import shlex
 
 # --- Configuration & Constants ---
@@ -16,7 +14,6 @@ COLORS = {
     'WARN': '\033[93m', 'FAIL': '\033[91m', 'ENDC': '\033[0m', 'BOLD': '\033[1m'
 }
 MOUNT_POINT = "/mnt/chimera_target"
-GENTOO_BASE = "https://distfiles.gentoo.org/releases/amd64/autobuilds"
 DEBIAN_RELEASE = "bookworm" # Stable
 
 # --- Utility Functions ---
@@ -34,15 +31,16 @@ def run_cmd(cmd, shell=False, check=True, chroot=False, ignore_error=False, env=
     if chroot:
         if isinstance(cmd, list): cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
         else: cmd_str = cmd
-        # Use arch-chroot if available for better proc/sys binding, else standard chroot
+        
+        # Use arch-chroot if available for better proc/sys binding
         if shutil.which("arch-chroot"):
             cmd = ["arch-chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
         else:
+            # Fallback for systems without arch-chroot
             cmd = ["chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
         shell = False
     
     try:
-        # Pass environment variables if needed
         proc = subprocess.run(cmd, shell=shell, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         return proc.returncode == 0
     except subprocess.CalledProcessError as e:
@@ -94,8 +92,11 @@ class ChimeraInstaller:
             self.ensure_network_logic()
             self.partition_handler()
             self.install_base()
-            if self.target_os not in ["arch", "debian"]: # pacstrap/debootstrap handle mounts internally usually
-                self.setup_chroot_mounts()
+            # Only setup manual mounts if NOT using arch/debian online tools (which handle it)
+            # OR if we don't have arch-chroot available.
+            if self.target_os not in ["arch", "debian"] or not self.args.online: 
+                if not shutil.which("arch-chroot"):
+                    self.setup_chroot_mounts()
             self.configure_system()
             self.install_bootloader()
             self.finalize()
@@ -113,11 +114,9 @@ class ChimeraInstaller:
         log(f"Chimera Installer - {self.target_os.upper()} Edition", "HEADER")
         log(f"Target Disk: {self.disk} | Boot Mode: {'UEFI' if self.uefi else 'BIOS'}", "info")
         
-        # Recommendation logic
         if self.target_os in ["arch", "debian"] and not self.args.online:
             print(f"\n{COLORS['WARN']}WARNING: You are performing an OFFLINE install for {self.target_os}.{COLORS['ENDC']}")
-            print(f"{COLORS['WARN']}This clones the live ISO, which can be unstable or carry over wrong configs.{COLORS['ENDC']}")
-            print(f"{COLORS['GREEN']}Suggestion: Restart with --online to use native tools (pacstrap/debootstrap).{COLORS['ENDC']}")
+            print(f"{COLORS['WARN']}This clones the live ISO. We will attempt to fix the kernel/hooks.{COLORS['ENDC']}")
             time.sleep(2)
 
     def safety_check(self):
@@ -143,7 +142,6 @@ class ChimeraInstaller:
     def partition_handler(self):
         log("Preparing Partitions...", "info")
         run_cmd(["umount", "-R", MOUNT_POINT], check=False, ignore_error=True)
-        # Ensure swap is off before partitioning
         run_cmd(["swapoff", "-a"], check=False, ignore_error=True)
         
         if self.args.disk:
@@ -176,7 +174,6 @@ class ChimeraInstaller:
         current_end = boot_part_end
         
         if self.args.swap:
-            # Simple parsing: assume G or M
             size = self.args.swap.upper()
             mult = 1024 if "G" in size else 1
             mb_size = int(''.join(filter(str.isdigit, size))) * mult
@@ -186,7 +183,6 @@ class ChimeraInstaller:
 
         run_cmd(["parted", "-s", self.disk, "mkpart", "primary", current_end, "100%"])
         
-        # Naming convention adjustment
         prefix = f"{self.disk}p" if self.disk.startswith("/dev/nvme") or self.disk.startswith("/dev/mmc") else f"{self.disk}"
         
         self.args.boot = f"{prefix}1"
@@ -211,50 +207,41 @@ class ChimeraInstaller:
         elif self.target_os == "debian" and self.args.online:
             self._install_debian_debootstrap()
         elif self.target_os == "gentoo":
-            self._install_gentoo_stage3()
+            pass # Gentoo logic placeholder
         else:
-            # Offline Cloning (Generic/Arch-Offline)
-            log("Mode: Offline/Clone (Ensure source is clean!)", "warn")
-            excludes = ["--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*", "--exclude=/run/*", "--exclude=/tmp/*", f"--exclude={MOUNT_POINT}/*"]
+            # Offline Cloning
+            log("Mode: Offline/Clone. Running Rsync...", "warn")
+            # Added /run/archiso to excludes to be safe
+            excludes = ["--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*", 
+                        "--exclude=/run/*", "--exclude=/tmp/*", "--exclude=/mnt/*", 
+                        f"--exclude={MOUNT_POINT}/*"]
+            
+            # Rsync the root
             subprocess.run(["rsync", "-axHAWXS", "--numeric-ids", "--info=progress2"] + excludes + ["/", MOUNT_POINT], check=True)
 
     def _install_arch_pacstrap(self):
-        log("Running pacstrap (Arch Wiki Way)...", "info")
+        log("Running pacstrap...", "info")
         pkgs = ["base", "linux", "linux-firmware", "base-devel", "nano", "networkmanager", "grub", "efibootmgr"]
         if self.args.profile == "desktop": pkgs.extend(["plasma-meta", "konsole", "dolphin", "sddm"])
-        
         run_cmd(["pacstrap", "-K", MOUNT_POINT] + pkgs)
-        # Genfstab is standard with pacstrap
         with open(f"{MOUNT_POINT}/etc/fstab", "w") as f:
             subprocess.run(["genfstab", "-U", MOUNT_POINT], stdout=f)
 
     def _install_debian_debootstrap(self):
         log(f"Running debootstrap ({DEBIAN_RELEASE})...", "info")
-        # Install base system
         run_cmd(["debootstrap", "--arch", "amd64", DEBIAN_RELEASE, MOUNT_POINT, "http://deb.debian.org/debian"])
-        
-        # Debootstrap doesn't create fstab, we must do it
         self._gen_fstab()
-        
-        # Debootstrap leaves sources.list minimal, let's ensure it's good
         with open(f"{MOUNT_POINT}/etc/apt/sources.list", "w") as f:
             f.write(f"deb http://deb.debian.org/debian {DEBIAN_RELEASE} main contrib non-free-firmware\n")
             f.write(f"deb http://deb.debian.org/debian-security {DEBIAN_RELEASE}-security main contrib non-free-firmware\n")
             f.write(f"deb http://deb.debian.org/debian {DEBIAN_RELEASE}-updates main contrib non-free-firmware\n")
 
-    def _install_gentoo_stage3(self):
-        # ... (Same logic as before, abbreviated for space) ...
-        # Assuming URL logic matches previous script
-        log("Downloading/Extracting Gentoo Stage3...", "info")
-        # (Simplified for the sake of the example - in real use, keep your url parser)
-        pass 
-
     def setup_chroot_mounts(self):
-        # Only needed for manual clone/gentoo. Pacstrap/Arch-chroot handles this.
         if shutil.which("arch-chroot"): return 
         log("Mounting API filesystems...", "info")
         for m in ["dev", "proc", "sys"]:
             target = os.path.join(MOUNT_POINT, m)
+            os.makedirs(target, exist_ok=True)
             run_cmd(["mount", "--rbind", f"/{m}", target], ignore_error=True)
             run_cmd(["mount", "--make-rslave", target], ignore_error=True)
         shutil.copy("/etc/resolv.conf", f"{MOUNT_POINT}/etc/resolv.conf")
@@ -266,37 +253,76 @@ class ChimeraInstaller:
         with open(f"{MOUNT_POINT}/etc/hostname", "w") as f:
             f.write("chimera-linux\n")
             
-        # Arch Specific Configuration
         if self.target_os == "arch":
-            # Set Locale
             run_cmd("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", chroot=True)
             run_cmd("locale-gen", chroot=True)
             run_cmd("systemctl enable NetworkManager", chroot=True, ignore_error=True)
-            
-            # Root Password (quick hack for demo)
             run_cmd("echo 'root:root' | chpasswd", chroot=True)
-
-        # Debian Specific Configuration
-        elif self.target_os == "debian":
-            # Mounts needed for apt if not using arch-chroot
-            if not shutil.which("arch-chroot"): self.setup_chroot_mounts()
             
-            # Update and Install Kernel (Debootstrap doesn't install kernel)
+            # --- FIX FOR OFFLINE CLONE ---
+            if not self.args.online:
+                log("Offline Mode: Fixing Kernel and Initramfs...", "warn")
+                
+                # 1. Ensure Kernel Exists (Rsync -x often skips /boot contents)
+                kernel_src = "/boot/vmlinuz-linux"
+                kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-linux"
+                
+                if not os.path.exists(kernel_dst):
+                    if os.path.exists(kernel_src):
+                        log(f"Copying kernel from {kernel_src}...", "info")
+                        shutil.copy(kernel_src, kernel_dst)
+                    else:
+                        log("WARNING: Could not find kernel in /boot. Proceeding, but mkinitcpio might fail.", "warn")
+
+                # 2. Fix archiso hooks in mkinitcpio.conf
+                # The live ISO has hooks like 'archiso_pxe_common' which fail on real metal.
+                # We need to replace the HOOKS line with a standard one.
+                conf_path = f"{MOUNT_POINT}/etc/mkinitcpio.conf"
+                try:
+                    with open(conf_path, 'r') as f:
+                        config_data = f.read()
+                    
+                    # Simple replacement to standard Arch defaults
+                    if "archiso" in config_data:
+                        log("Removing archiso hooks from mkinitcpio.conf...", "info")
+                        # Standard hooks for Arch
+                        std_hooks = 'HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block filesystems fsck)'
+                        # Regex or simple string manipulation could work.
+                        # Since we are scripting, let's just comment out old hooks and append new ones if we detect archiso
+                        lines = config_data.splitlines()
+                        new_lines = []
+                        for line in lines:
+                            if line.strip().startswith("HOOKS") and "archiso" in line:
+                                new_lines.append(f"# {line} # Commented by Chimera")
+                                new_lines.append(std_hooks)
+                            else:
+                                new_lines.append(line)
+                        
+                        with open(conf_path, 'w') as f:
+                            f.write("\n".join(new_lines))
+
+                except Exception as e:
+                    log(f"Failed to patch mkinitcpio.conf: {e}", "warn")
+
+                # 3. Clean preset junk
+                if os.path.exists(f"{MOUNT_POINT}/etc/mkinitcpio.d/archiso.preset"):
+                    os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.d/archiso.preset")
+                
+                # 4. Remove archiso confs
+                if os.path.exists(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf"):
+                    os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf")
+
+                # 5. Rebuild
+                run_cmd("mkinitcpio -P", chroot=True)
+
+        elif self.target_os == "debian":
+            if not shutil.which("arch-chroot"): self.setup_chroot_mounts()
             env = {"DEBIAN_FRONTEND": "noninteractive"}
             run_cmd("apt-get update", chroot=True, env=env)
             run_cmd("apt-get install -y linux-image-amd64 linux-headers-amd64 locales grub-efi-amd64 network-manager", chroot=True, env=env)
-            
             run_cmd("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", chroot=True)
             run_cmd("locale-gen", chroot=True)
             run_cmd("echo 'root:root' | chpasswd", chroot=True)
-
-        # Clone Fix (The error from your screenshot)
-        if self.target_os == "arch" and not self.args.online:
-            # Remove live media config
-            if os.path.exists(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf"):
-                os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf")
-            # Rebuild initramfs
-            run_cmd("mkinitcpio -P", chroot=True)
 
     def _gen_fstab(self):
         if shutil.which("genfstab"):
@@ -318,14 +344,12 @@ class ChimeraInstaller:
         target = "x86_64-efi" if self.uefi else "i386-pc"
         
         if self.target_os == "debian":
-            # Debian usually handles grub-install via apt hooks, but we ensure it
             if self.uefi:
                 run_cmd("grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck", chroot=True)
             else:
                 run_cmd(f"grub-install --target=i386-pc {self.disk}", chroot=True)
             run_cmd("update-grub", chroot=True)
-            
-        else: # Arch / Gentoo / Generic
+        else:
             cmd = ["grub-install", f"--target={target}", "--bootloader-id=Chimera", "--recheck"]
             if self.uefi: cmd.append("--efi-directory=/boot/efi")
             else: cmd.append(self.disk)
@@ -334,7 +358,6 @@ class ChimeraInstaller:
             run_cmd("grub-mkconfig -o /boot/grub/grub.cfg", chroot=True)
 
     def finalize(self):
-        # Set machine-id
         run_cmd("systemd-machine-id-setup", chroot=True, ignore_error=True)
 
     def cleanup(self):
