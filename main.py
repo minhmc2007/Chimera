@@ -16,6 +16,7 @@ COLORS = {
 }
 MOUNT_POINT = "/mnt/chimera_target"
 DEBIAN_RELEASE = "bookworm" # Stable
+DEBUG_MODE = False
 
 # --- Utility Functions ---
 def log(msg, level="info"):
@@ -25,28 +26,42 @@ def log(msg, level="info"):
     elif level == "success": icon, color = "[+]", COLORS['GREEN']
     elif level == "warn": icon, color = "[?]", COLORS['WARN']
     elif level == "HEADER": icon, color = "[#]", COLORS['HEADER']
+    elif level == "DEBUG": icon, color = "[D]", COLORS['WARN']
     
     print(f"{color}{icon} {msg}{COLORS['ENDC']}")
 
-def run_cmd(cmd, shell=False, check=True, chroot=False, ignore_error=False, env=None):
+def run_cmd(cmd, shell=False, check=True, chroot=False, ignore_error=False, env=None, stream=False):
+    # Stream output if explicitly requested OR if global debug mode is on
+    show_output = stream or DEBUG_MODE
+
     if chroot:
         if isinstance(cmd, list): cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
         else: cmd_str = cmd
         
-        # Use arch-chroot if available for better proc/sys binding
         if shutil.which("arch-chroot"):
             cmd = ["arch-chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
         else:
             cmd = ["chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
         shell = False
     
+    if DEBUG_MODE:
+        log(f"CMD: {cmd}", "DEBUG")
+
     try:
-        proc = subprocess.run(cmd, shell=shell, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        if show_output:
+            # Print directly to console
+            proc = subprocess.run(cmd, shell=shell, check=check, env=env)
+        else:
+            # Capture output
+            proc = subprocess.run(cmd, shell=shell, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         return proc.returncode == 0
     except subprocess.CalledProcessError as e:
         if not ignore_error:
             log(f"Command Failed: {cmd}", "error")
-            print(f"{COLORS['FAIL']}STDERR: {e.stderr.decode().strip()}{COLORS['ENDC']}")
+            if e.stderr:
+                print(f"{COLORS['FAIL']}STDERR: {e.stderr.decode().strip()}{COLORS['ENDC']}")
+            elif show_output:
+                print(f"{COLORS['FAIL']}(Command failed, output above){COLORS['ENDC']}")
             if check: raise e 
         return False
 
@@ -99,7 +114,7 @@ class ChimeraInstaller:
                 if not shutil.which("arch-chroot"):
                     self.setup_chroot_mounts()
             self.configure_system()
-            self.setup_users()  # <-- Updated function handles Root + User
+            self.setup_users()
             self.run_custom_scripts()
             self.install_bootloader()
             self.finalize()
@@ -116,10 +131,19 @@ class ChimeraInstaller:
         os.system("clear")
         log(f"Chimera Installer - {self.target_os.upper()} Edition", "HEADER")
         log(f"Target Disk: {self.disk} | Boot Mode: {'UEFI' if self.uefi else 'BIOS'}", "info")
+        
+        if DEBUG_MODE:
+            log("Debug Mode: ON (Verbose output enabled)", "DEBUG")
+            log("Current Disk Layout:", "DEBUG")
+            subprocess.run(["lsblk"])
+            print("-" * 40)
+
         if self.args.user:
             log(f"User Setup: {self.args.user}", "info")
         if self.args.passwd:
             log("Password set for Root (and User).", "info")
+        if self.args.timezone:
+            log(f"Timezone: {self.args.timezone}", "info")
         
         if self.target_os in ["arch", "debian"] and not self.args.online:
             print(f"\n{COLORS['WARN']}WARNING: Offline install. Cloning live ISO.{COLORS['ENDC']}")
@@ -222,7 +246,6 @@ class ChimeraInstaller:
 
     def _install_arch_pacstrap(self):
         log("Running pacstrap...", "info")
-        # Added sudo here
         pkgs = ["base", "linux", "linux-firmware", "base-devel", "nano", "networkmanager", "grub", "efibootmgr", "sudo"]
         if self.args.profile == "desktop": pkgs.extend(["plasma-meta", "konsole", "dolphin", "sddm"])
         run_cmd(["pacstrap", "-K", MOUNT_POINT] + pkgs)
@@ -251,14 +274,30 @@ class ChimeraInstaller:
     def configure_system(self):
         log("Configuring System...", "info")
         
+        # --- 1. Branding / Hostname ---
+        # Removing "chimera-linux". Using target_os name (e.g., 'arch', 'debian')
+        log(f"Setting hostname to '{self.target_os}'...", "info")
         with open(f"{MOUNT_POINT}/etc/hostname", "w") as f:
-            f.write("chimera-linux\n")
-            
+            f.write(f"{self.target_os}\n")
+        
+        # --- 2. Timezone Setup ---
+        if self.args.timezone:
+            tz_path = f"/usr/share/zoneinfo/{self.args.timezone}"
+            # Check if it exists inside the mount (best effort)
+            if os.path.exists(f"{MOUNT_POINT}{tz_path}"):
+                log(f"Setting timezone to {self.args.timezone}...", "info")
+                run_cmd(f"ln -sf {tz_path} /etc/localtime", chroot=True)
+                run_cmd("hwclock --systohc", chroot=True, ignore_error=True)
+            else:
+                log(f"Timezone {self.args.timezone} not found in target!", "warn")
+        else:
+            log("No timezone specified (UTC default).", "info")
+
+        # --- 3. Distro Specifics ---
         if self.target_os == "arch":
             run_cmd("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", chroot=True)
             run_cmd("locale-gen", chroot=True)
             run_cmd("systemctl enable NetworkManager", chroot=True, ignore_error=True)
-            # REMOVED hardcoded root:root here. Handled in setup_users()
             
             # --- FIX FOR OFFLINE CLONE ---
             if not self.args.online:
@@ -321,13 +360,10 @@ class ChimeraInstaller:
             if not shutil.which("arch-chroot"): self.setup_chroot_mounts()
             env = {"DEBIAN_FRONTEND": "noninteractive"}
             run_cmd("apt-get update", chroot=True, env=env)
-            # Added sudo here
             run_cmd("apt-get install -y linux-image-amd64 linux-headers-amd64 locales grub-efi-amd64 network-manager sudo", chroot=True, env=env)
             run_cmd("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", chroot=True)
             run_cmd("locale-gen", chroot=True)
-            # REMOVED hardcoded root:root here
 
-    # --- UPDATED: USER & ROOT PASSWORD SETUP ---
     def setup_users(self):
         pwd = self.args.passwd
         
@@ -339,12 +375,10 @@ class ChimeraInstaller:
             log("No --passwd provided. Defaulting ROOT password to 'root' (Change immediately!).", "warn")
             run_cmd("echo 'root:root' | chpasswd", chroot=True)
 
-        # 2. Create User (if requested)
+        # 2. Create User
         if self.args.user:
             user = self.args.user
             log(f"Creating user '{user}'...", "info")
-            
-            # -m: Create home, -G wheel: Add to wheel group, -s: Shell
             if not run_cmd(f"useradd -m -G wheel -s /bin/bash {user}", chroot=True, ignore_error=True):
                 log(f"User {user} might already exist or creation failed.", "warn")
 
@@ -356,19 +390,16 @@ class ChimeraInstaller:
             log("Configuring sudo access...", "info")
             sudo_content = f"{user} ALL=(ALL:ALL) ALL\n"
             sudo_file = f"{MOUNT_POINT}/etc/sudoers.d/{user}"
-            
             os.makedirs(f"{MOUNT_POINT}/etc/sudoers.d", exist_ok=True)
-            with open(sudo_file, "w") as f:
-                f.write(sudo_content)
-            
-            # Sudoers files must be 0440
+            with open(sudo_file, "w") as f: f.write(sudo_content)
             os.chmod(sudo_file, 0o440)
             log(f"User '{user}' added to sudoers.", "success")
 
     def run_custom_scripts(self):
         if not self.args.run: return
         log(f"Running Post-Install Command: {self.args.run}", "warn")
-        run_cmd(self.args.run, chroot=True)
+        # Stream the output so user sees it in debug mode or if verbose
+        run_cmd(self.args.run, chroot=True, stream=True)
 
     def _gen_fstab(self):
         if shutil.which("genfstab"):
@@ -389,14 +420,17 @@ class ChimeraInstaller:
         log("Installing Bootloader...", "info")
         target = "x86_64-efi" if self.uefi else "i386-pc"
         
+        # Changed branding from 'Chimera' to self.target_os (e.g. 'arch')
+        boot_id = self.target_os 
+
         if self.target_os == "debian":
             if self.uefi:
-                run_cmd("grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=debian --recheck", chroot=True)
+                run_cmd(f"grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id={boot_id} --recheck", chroot=True)
             else:
                 run_cmd(f"grub-install --target=i386-pc {self.disk}", chroot=True)
             run_cmd("update-grub", chroot=True)
         else:
-            cmd = ["grub-install", f"--target={target}", "--bootloader-id=Chimera", "--recheck"]
+            cmd = ["grub-install", f"--target={target}", f"--bootloader-id={boot_id}", "--recheck"]
             if self.uefi: cmd.append("--efi-directory=/boot/efi")
             else: cmd.append(self.disk)
             
@@ -422,15 +456,21 @@ def main():
     parser.add_argument("--init", choices=["systemd", "openrc"], default="systemd")
     parser.add_argument("--profile", choices=["cli", "desktop"], default="cli")
     
-    # New Arguments
+    # New / Updated Arguments
     parser.add_argument("--user", help="Create a new user")
     parser.add_argument("--passwd", help="Password for the new user AND root")
     parser.add_argument("--run", help="Custom command to run inside chroot after install")
+    parser.add_argument("--timezone", help="Set Timezone (e.g. Asia/Ho_Chi_Minh)")
+    parser.add_argument("--debug", action="store_true", help="Enable verbose output (lsblk, command stream)")
     
     parser.add_argument("--i-am-very-stupid", action="store_true")
     
     args = parser.parse_args()
     
+    # Set Global Debug
+    global DEBUG_MODE
+    DEBUG_MODE = args.debug
+
     if os.geteuid() != 0: sys.exit("Run as root.")
     if not args.disk and not (args.boot and args.rootfs):
         sys.exit("Error: Must specify --disk OR (--boot and --rootfs)")
