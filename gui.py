@@ -17,7 +17,9 @@ from PySide6.QtGui import QPixmap, QIcon, QPalette, QColor, QFont, QPainter, QBr
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(ASSET_DIR, "logo.png")
 BG_PATH = os.path.join(ASSET_DIR, "backg.png")
-BACKEND_SCRIPT = os.path.join(ASSET_DIR, "chimera_backend.py")
+
+# CHANGED: Backend script is now main.py
+BACKEND_SCRIPT = os.path.join(ASSET_DIR, "main.py")
 
 # Colors
 COL_SKY_BLUE = "#87CEEB"
@@ -553,7 +555,7 @@ class InstallerWindow(QMainWindow):
         cmd = ["python3", "-u", BACKEND_SCRIPT]
         d = self.install_data
         
-        # --- FIX: Handle NoneType for Debug View ---
+        # --- Handle NoneType for Debug View ---
         if d['method'] == 'whole':
             disk_val = d['disk'] if d['disk'] else "[NO_DISK]"
             cmd.extend(["--disk", disk_val])
@@ -572,6 +574,10 @@ class InstallerWindow(QMainWindow):
         cmd.extend(["--passwd", d['pass']])
         cmd.extend(["--timezone", d['tz']])
         cmd.extend(["--target", "arch"])
+        
+        # CHANGED: Add the flag to bypass interactive confirmation
+        cmd.append("--i-am-very-stupid") 
+        
         cmd.append("--debug")
         
         return cmd
@@ -728,7 +734,8 @@ class InstallerWindow(QMainWindow):
 
     def read_output(self):
         data = self.process.readAllStandardOutput().data().decode()
-        # --- FIX: Use QTextCursor Enum correctly ---
+        
+        # CHANGED: Fix for QTextCursor crash
         self.txt_log.moveCursor(QTextCursor.End)
         self.txt_log.insertPlainText(data)
         self.txt_log.moveCursor(QTextCursor.End)
