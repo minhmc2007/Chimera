@@ -33,7 +33,6 @@ def run_cmd(cmd, shell=False, check=True, chroot=False, ignore_error=False, env=
         if isinstance(cmd, list): cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
         else: cmd_str = cmd
         
-        # Use arch-chroot if available for better proc/sys binding
         if shutil.which("arch-chroot"):
             cmd = ["arch-chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
         else:
@@ -113,7 +112,7 @@ class ChimeraInstaller:
         
         if self.target_os in ["arch", "debian"] and not self.args.online:
             print(f"\n{COLORS['WARN']}WARNING: You are performing an OFFLINE install for {self.target_os}.{COLORS['ENDC']}")
-            print(f"{COLORS['WARN']}This clones the live ISO. We will attempt to fix the kernel/hooks.{COLORS['ENDC']}")
+            print(f"{COLORS['WARN']}This clones the live ISO.{COLORS['ENDC']}")
             time.sleep(2)
 
     def safety_check(self):
@@ -206,6 +205,7 @@ class ChimeraInstaller:
             pass 
         else:
             log("Mode: Offline/Clone. Running Rsync...", "warn")
+            # Exclude mounts and tmp files, copy everything else
             excludes = ["--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*", 
                         "--exclude=/run/*", "--exclude=/tmp/*", "--exclude=/mnt/*", 
                         f"--exclude={MOUNT_POINT}/*"]
@@ -252,37 +252,46 @@ class ChimeraInstaller:
             
             # --- FIX FOR OFFLINE CLONE ---
             if not self.args.online:
-                log("Offline Mode: Fixing Kernel and Initramfs...", "warn")
+                log("Offline Mode: Extracting Kernel...", "warn")
                 
-                # 1. FIND THE KERNEL ON LIVE MEDIA
-                # Arch ISO mounts boot partition to /run/archiso/bootmnt
-                kernel_candidates = [
-                    "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux", # Standard
-                    "/run/archiso/bootmnt/vmlinuz-linux",                  # Alternative
-                    "/boot/vmlinuz-linux"                                  # Fallback
-                ]
-                
-                kernel_src = None
-                for candidate in kernel_candidates:
-                    if os.path.exists(candidate):
-                        kernel_src = candidate
-                        break
-
+                # Target destination
                 kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-linux"
                 os.makedirs(os.path.dirname(kernel_dst), exist_ok=True)
 
-                if kernel_src:
-                    log(f"Found kernel at: {kernel_src}", "success")
+                # SEARCH LOGIC BASED ON YOUR SCREENSHOT
+                # Screenshot shows: /usr/lib/modules/6.18.7-arch1-1/vmlinuz
+                # We use glob to catch the version number dynamically
+                
+                search_patterns = [
+                    "/usr/lib/modules/*/vmlinuz",  # PRIMARY (Matches your screenshot)
+                    "/boot/vmlinuz-linux",         # Fallback
+                    "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux" # Fallback ISO mount
+                ]
+                
+                kernel_src = None
+                
+                for pattern in search_patterns:
+                    matches = glob.glob(pattern)
+                    if matches:
+                        # Sort to get the "highest" version if multiple exist
+                        matches.sort(reverse=True)
+                        kernel_src = matches[0]
+                        break
+                
+                if kernel_src and os.path.exists(kernel_src):
+                    log(f"Found kernel source: {kernel_src}", "success")
+                    # RENAME to vmlinuz-linux so mkinitcpio presets work
+                    log(f"Copying to {kernel_dst}...", "info")
                     shutil.copy(kernel_src, kernel_dst)
+                    os.chmod(kernel_dst, 0o644)
                 else:
-                    log(f"{COLORS['FAIL']}CRITICAL: Could not find kernel on live media.{COLORS['ENDC']}", "error")
-                    # We continue, but mkinitcpio will likely fail
+                    log(f"{COLORS['FAIL']}CRITICAL: Kernel not found!{COLORS['ENDC']}", "error")
+                    log("Please manually copy /usr/lib/modules/YOUR_VERSION/vmlinuz to /mnt/chimera_target/boot/vmlinuz-linux", "warn")
 
-                # 2. Fix archiso hooks
+                # Fix mkinitcpio.conf hooks
                 conf_path = f"{MOUNT_POINT}/etc/mkinitcpio.conf"
                 try:
-                    with open(conf_path, 'r') as f:
-                        config_data = f.read()
+                    with open(conf_path, 'r') as f: config_data = f.read()
                     
                     if "archiso" in config_data:
                         log("Sanitizing mkinitcpio.conf hooks...", "info")
@@ -296,18 +305,18 @@ class ChimeraInstaller:
                             else:
                                 new_lines.append(line)
                         
-                        with open(conf_path, 'w') as f:
-                            f.write("\n".join(new_lines))
+                        with open(conf_path, 'w') as f: f.write("\n".join(new_lines))
                 except Exception as e:
                     log(f"Failed to patch mkinitcpio.conf: {e}", "warn")
 
-                # 3. Clean preset junk
-                if os.path.exists(f"{MOUNT_POINT}/etc/mkinitcpio.d/archiso.preset"):
-                    os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.d/archiso.preset")
+                # Remove archiso presets that break things
+                for f in glob.glob(f"{MOUNT_POINT}/etc/mkinitcpio.d/*.preset"):
+                    if "archiso" in f: os.remove(f)
+                
                 if os.path.exists(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf"):
                     os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf")
 
-                # 4. Rebuild
+                # Rebuild
                 log("Rebuilding initramfs...", "info")
                 run_cmd("mkinitcpio -P", chroot=True)
 
