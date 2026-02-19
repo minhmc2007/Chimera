@@ -33,6 +33,7 @@ def run_cmd(cmd, shell=False, check=True, chroot=False, ignore_error=False, env=
         if isinstance(cmd, list): cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
         else: cmd_str = cmd
         
+        # Use arch-chroot if available for better proc/sys binding
         if shutil.which("arch-chroot"):
             cmd = ["arch-chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
         else:
@@ -70,6 +71,10 @@ class ChimeraInstaller:
         self.target_os = args.target.lower()
         self.disk = args.disk if args.disk else self._detect_disk(args.rootfs)
         
+        # Validation
+        if self.args.user and not self.args.passwd:
+            sys.exit(f"{COLORS['FAIL']}Error: --user requires --passwd{COLORS['ENDC']}")
+
         if self.target_os == "arch" and self.args.online and not shutil.which("pacstrap"):
             sys.exit(f"{COLORS['FAIL']}Error: 'pacstrap' not found. Install 'arch-install-scripts'.{COLORS['ENDC']}")
         if self.target_os == "debian" and self.args.online and not shutil.which("debootstrap"):
@@ -94,6 +99,8 @@ class ChimeraInstaller:
                 if not shutil.which("arch-chroot"):
                     self.setup_chroot_mounts()
             self.configure_system()
+            self.create_user()  # <-- NEW
+            self.run_custom_scripts() # <-- NEW
             self.install_bootloader()
             self.finalize()
             log("Installation Successfully Completed.", "success")
@@ -109,11 +116,14 @@ class ChimeraInstaller:
         os.system("clear")
         log(f"Chimera Installer - {self.target_os.upper()} Edition", "HEADER")
         log(f"Target Disk: {self.disk} | Boot Mode: {'UEFI' if self.uefi else 'BIOS'}", "info")
+        if self.args.user:
+            log(f"User Setup: {self.args.user}", "info")
+        if self.args.run:
+            log(f"Post-Install Command: {self.args.run}", "info")
         
         if self.target_os in ["arch", "debian"] and not self.args.online:
-            print(f"\n{COLORS['WARN']}WARNING: You are performing an OFFLINE install for {self.target_os}.{COLORS['ENDC']}")
-            print(f"{COLORS['WARN']}This clones the live ISO.{COLORS['ENDC']}")
-            time.sleep(2)
+            print(f"\n{COLORS['WARN']}WARNING: Offline install. Cloning live ISO.{COLORS['ENDC']}")
+            time.sleep(1)
 
     def safety_check(self):
         if self.args.i_am_very_stupid: return
@@ -212,7 +222,8 @@ class ChimeraInstaller:
 
     def _install_arch_pacstrap(self):
         log("Running pacstrap...", "info")
-        pkgs = ["base", "linux", "linux-firmware", "base-devel", "nano", "networkmanager", "grub", "efibootmgr"]
+        # Ensure sudo is installed
+        pkgs = ["base", "linux", "linux-firmware", "base-devel", "nano", "networkmanager", "grub", "efibootmgr", "sudo"]
         if self.args.profile == "desktop": pkgs.extend(["plasma-meta", "konsole", "dolphin", "sddm"])
         run_cmd(["pacstrap", "-K", MOUNT_POINT] + pkgs)
         with open(f"{MOUNT_POINT}/etc/fstab", "w") as f:
@@ -252,15 +263,9 @@ class ChimeraInstaller:
             # --- FIX FOR OFFLINE CLONE ---
             if not self.args.online:
                 log("Offline Mode: Extracting Kernel...", "warn")
-                
                 kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-linux"
                 os.makedirs(os.path.dirname(kernel_dst), exist_ok=True)
-
-                search_patterns = [
-                    "/usr/lib/modules/*/vmlinuz",  
-                    "/boot/vmlinuz-linux",         
-                    "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux"
-                ]
+                search_patterns = ["/usr/lib/modules/*/vmlinuz", "/boot/vmlinuz-linux", "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux"]
                 
                 kernel_src = None
                 for pattern in search_patterns:
@@ -271,32 +276,25 @@ class ChimeraInstaller:
                         break
                 
                 if kernel_src and os.path.exists(kernel_src):
-                    log(f"Found kernel source: {kernel_src}", "success")
-                    log(f"Copying to {kernel_dst}...", "info")
+                    log(f"Found kernel: {kernel_src}", "success")
                     shutil.copy(kernel_src, kernel_dst)
                     os.chmod(kernel_dst, 0o644)
                 else:
                     log(f"{COLORS['FAIL']}CRITICAL: Kernel not found!{COLORS['ENDC']}", "error")
 
-                # --- NEW: Fix the Presets causing the 'Invalid option -c' error ---
+                # Sanitize Presets
                 log("Sanitizing mkinitcpio presets...", "info")
                 preset_dir = f"{MOUNT_POINT}/etc/mkinitcpio.d"
                 if os.path.exists(preset_dir):
                     for preset in glob.glob(f"{preset_dir}/*.preset"):
                         try:
-                            with open(preset, 'r') as f:
-                                content = f.read()
-                            
-                            # Replace the ArchISO specific config path with the standard one
+                            with open(preset, 'r') as f: content = f.read()
                             if "archiso.conf" in content:
-                                log(f"Fixing preset: {preset}", "info")
                                 content = content.replace("/etc/mkinitcpio.conf.d/archiso.conf", "/etc/mkinitcpio.conf")
-                                with open(preset, 'w') as f:
-                                    f.write(content)
-                        except Exception as e:
-                            log(f"Preset fix error: {e}", "warn")
+                                with open(preset, 'w') as f: f.write(content)
+                        except Exception: pass
 
-                # Fix main config hooks
+                # Sanitize Config
                 conf_path = f"{MOUNT_POINT}/etc/mkinitcpio.conf"
                 try:
                     with open(conf_path, 'r') as f: config_data = f.read()
@@ -313,11 +311,9 @@ class ChimeraInstaller:
                         with open(conf_path, 'w') as f: f.write("\n".join(new_lines))
                 except Exception: pass
 
-                # Clean up old config files
                 if os.path.exists(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf"):
                     os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf")
 
-                # Rebuild
                 log("Rebuilding initramfs...", "info")
                 run_cmd("mkinitcpio -P", chroot=True)
 
@@ -325,10 +321,52 @@ class ChimeraInstaller:
             if not shutil.which("arch-chroot"): self.setup_chroot_mounts()
             env = {"DEBIAN_FRONTEND": "noninteractive"}
             run_cmd("apt-get update", chroot=True, env=env)
-            run_cmd("apt-get install -y linux-image-amd64 linux-headers-amd64 locales grub-efi-amd64 network-manager", chroot=True, env=env)
+            # Added 'sudo' to the list here
+            run_cmd("apt-get install -y linux-image-amd64 linux-headers-amd64 locales grub-efi-amd64 network-manager sudo", chroot=True, env=env)
             run_cmd("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", chroot=True)
             run_cmd("locale-gen", chroot=True)
             run_cmd("echo 'root:root' | chpasswd", chroot=True)
+
+    # --- NEW: USER SETUP ---
+    def create_user(self):
+        if not self.args.user: return
+        
+        user = self.args.user
+        pwd = self.args.passwd
+        
+        log(f"Creating user '{user}'...", "info")
+        
+        # 1. Create User
+        # -m: Create home, -G wheel: Add to wheel group, -s: Shell
+        if not run_cmd(f"useradd -m -G wheel -s /bin/bash {user}", chroot=True, ignore_error=True):
+            log(f"User {user} might already exist or creation failed.", "warn")
+
+        # 2. Set Password
+        # chpasswd is the non-interactive way to do what 'passwd' does interactively.
+        # It handles the hashing and shadow file updates safely.
+        log("Setting user password...", "info")
+        run_cmd(f"echo '{user}:{pwd}' | chpasswd", chroot=True)
+
+        # 3. Configure Sudoers
+        # We create a specific file in sudoers.d instead of appending to the main file (cleaner)
+        log("Configuring sudo access...", "info")
+        sudo_content = f"{user} ALL=(ALL:ALL) ALL\n"
+        sudo_file = f"{MOUNT_POINT}/etc/sudoers.d/{user}"
+        
+        os.makedirs(f"{MOUNT_POINT}/etc/sudoers.d", exist_ok=True)
+        with open(sudo_file, "w") as f:
+            f.write(sudo_content)
+        
+        # Sudoers files must be 0440
+        os.chmod(sudo_file, 0o440)
+        log(f"User '{user}' created and added to sudoers.", "success")
+
+    # --- NEW: CUSTOM COMMAND RUNNER ---
+    def run_custom_scripts(self):
+        if not self.args.run: return
+        log(f"Running Post-Install Command: {self.args.run}", "warn")
+        # Run inside chroot
+        run_cmd(self.args.run, chroot=True)
 
     def _gen_fstab(self):
         if shutil.which("genfstab"):
@@ -381,6 +419,12 @@ def main():
     parser.add_argument("--online", action="store_true", help="Use pacstrap/debootstrap instead of cloning")
     parser.add_argument("--init", choices=["systemd", "openrc"], default="systemd")
     parser.add_argument("--profile", choices=["cli", "desktop"], default="cli")
+    
+    # New Arguments
+    parser.add_argument("--user", help="Create a new user")
+    parser.add_argument("--passwd", help="Password for the new user")
+    parser.add_argument("--run", help="Custom command to run inside chroot after install")
+    
     parser.add_argument("--i-am-very-stupid", action="store_true")
     
     args = parser.parse_args()
