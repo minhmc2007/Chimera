@@ -99,8 +99,8 @@ class ChimeraInstaller:
                 if not shutil.which("arch-chroot"):
                     self.setup_chroot_mounts()
             self.configure_system()
-            self.create_user()  # <-- NEW
-            self.run_custom_scripts() # <-- NEW
+            self.setup_users()  # <-- Updated function handles Root + User
+            self.run_custom_scripts()
             self.install_bootloader()
             self.finalize()
             log("Installation Successfully Completed.", "success")
@@ -118,8 +118,8 @@ class ChimeraInstaller:
         log(f"Target Disk: {self.disk} | Boot Mode: {'UEFI' if self.uefi else 'BIOS'}", "info")
         if self.args.user:
             log(f"User Setup: {self.args.user}", "info")
-        if self.args.run:
-            log(f"Post-Install Command: {self.args.run}", "info")
+        if self.args.passwd:
+            log("Password set for Root (and User).", "info")
         
         if self.target_os in ["arch", "debian"] and not self.args.online:
             print(f"\n{COLORS['WARN']}WARNING: Offline install. Cloning live ISO.{COLORS['ENDC']}")
@@ -222,7 +222,7 @@ class ChimeraInstaller:
 
     def _install_arch_pacstrap(self):
         log("Running pacstrap...", "info")
-        # Ensure sudo is installed
+        # Added sudo here
         pkgs = ["base", "linux", "linux-firmware", "base-devel", "nano", "networkmanager", "grub", "efibootmgr", "sudo"]
         if self.args.profile == "desktop": pkgs.extend(["plasma-meta", "konsole", "dolphin", "sddm"])
         run_cmd(["pacstrap", "-K", MOUNT_POINT] + pkgs)
@@ -258,7 +258,7 @@ class ChimeraInstaller:
             run_cmd("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", chroot=True)
             run_cmd("locale-gen", chroot=True)
             run_cmd("systemctl enable NetworkManager", chroot=True, ignore_error=True)
-            run_cmd("echo 'root:root' | chpasswd", chroot=True)
+            # REMOVED hardcoded root:root here. Handled in setup_users()
             
             # --- FIX FOR OFFLINE CLONE ---
             if not self.args.online:
@@ -321,51 +321,53 @@ class ChimeraInstaller:
             if not shutil.which("arch-chroot"): self.setup_chroot_mounts()
             env = {"DEBIAN_FRONTEND": "noninteractive"}
             run_cmd("apt-get update", chroot=True, env=env)
-            # Added 'sudo' to the list here
+            # Added sudo here
             run_cmd("apt-get install -y linux-image-amd64 linux-headers-amd64 locales grub-efi-amd64 network-manager sudo", chroot=True, env=env)
             run_cmd("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", chroot=True)
             run_cmd("locale-gen", chroot=True)
-            run_cmd("echo 'root:root' | chpasswd", chroot=True)
+            # REMOVED hardcoded root:root here
 
-    # --- NEW: USER SETUP ---
-    def create_user(self):
-        if not self.args.user: return
-        
-        user = self.args.user
+    # --- UPDATED: USER & ROOT PASSWORD SETUP ---
+    def setup_users(self):
         pwd = self.args.passwd
         
-        log(f"Creating user '{user}'...", "info")
-        
-        # 1. Create User
-        # -m: Create home, -G wheel: Add to wheel group, -s: Shell
-        if not run_cmd(f"useradd -m -G wheel -s /bin/bash {user}", chroot=True, ignore_error=True):
-            log(f"User {user} might already exist or creation failed.", "warn")
+        # 1. Set ROOT Password
+        if pwd:
+            log("Setting ROOT password...", "info")
+            run_cmd(f"echo 'root:{pwd}' | chpasswd", chroot=True)
+        else:
+            log("No --passwd provided. Defaulting ROOT password to 'root' (Change immediately!).", "warn")
+            run_cmd("echo 'root:root' | chpasswd", chroot=True)
 
-        # 2. Set Password
-        # chpasswd is the non-interactive way to do what 'passwd' does interactively.
-        # It handles the hashing and shadow file updates safely.
-        log("Setting user password...", "info")
-        run_cmd(f"echo '{user}:{pwd}' | chpasswd", chroot=True)
+        # 2. Create User (if requested)
+        if self.args.user:
+            user = self.args.user
+            log(f"Creating user '{user}'...", "info")
+            
+            # -m: Create home, -G wheel: Add to wheel group, -s: Shell
+            if not run_cmd(f"useradd -m -G wheel -s /bin/bash {user}", chroot=True, ignore_error=True):
+                log(f"User {user} might already exist or creation failed.", "warn")
 
-        # 3. Configure Sudoers
-        # We create a specific file in sudoers.d instead of appending to the main file (cleaner)
-        log("Configuring sudo access...", "info")
-        sudo_content = f"{user} ALL=(ALL:ALL) ALL\n"
-        sudo_file = f"{MOUNT_POINT}/etc/sudoers.d/{user}"
-        
-        os.makedirs(f"{MOUNT_POINT}/etc/sudoers.d", exist_ok=True)
-        with open(sudo_file, "w") as f:
-            f.write(sudo_content)
-        
-        # Sudoers files must be 0440
-        os.chmod(sudo_file, 0o440)
-        log(f"User '{user}' created and added to sudoers.", "success")
+            if pwd:
+                log(f"Setting password for user '{user}'...", "info")
+                run_cmd(f"echo '{user}:{pwd}' | chpasswd", chroot=True)
 
-    # --- NEW: CUSTOM COMMAND RUNNER ---
+            # 3. Configure Sudoers
+            log("Configuring sudo access...", "info")
+            sudo_content = f"{user} ALL=(ALL:ALL) ALL\n"
+            sudo_file = f"{MOUNT_POINT}/etc/sudoers.d/{user}"
+            
+            os.makedirs(f"{MOUNT_POINT}/etc/sudoers.d", exist_ok=True)
+            with open(sudo_file, "w") as f:
+                f.write(sudo_content)
+            
+            # Sudoers files must be 0440
+            os.chmod(sudo_file, 0o440)
+            log(f"User '{user}' added to sudoers.", "success")
+
     def run_custom_scripts(self):
         if not self.args.run: return
         log(f"Running Post-Install Command: {self.args.run}", "warn")
-        # Run inside chroot
         run_cmd(self.args.run, chroot=True)
 
     def _gen_fstab(self):
@@ -422,7 +424,7 @@ def main():
     
     # New Arguments
     parser.add_argument("--user", help="Create a new user")
-    parser.add_argument("--passwd", help="Password for the new user")
+    parser.add_argument("--passwd", help="Password for the new user AND root")
     parser.add_argument("--run", help="Custom command to run inside chroot after install")
     
     parser.add_argument("--i-am-very-stupid", action="store_true")
