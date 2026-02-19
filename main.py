@@ -205,7 +205,6 @@ class ChimeraInstaller:
             pass 
         else:
             log("Mode: Offline/Clone. Running Rsync...", "warn")
-            # Exclude mounts and tmp files, copy everything else
             excludes = ["--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*", 
                         "--exclude=/run/*", "--exclude=/tmp/*", "--exclude=/mnt/*", 
                         f"--exclude={MOUNT_POINT}/*"]
@@ -254,47 +253,54 @@ class ChimeraInstaller:
             if not self.args.online:
                 log("Offline Mode: Extracting Kernel...", "warn")
                 
-                # Target destination
                 kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-linux"
                 os.makedirs(os.path.dirname(kernel_dst), exist_ok=True)
 
-                # SEARCH LOGIC BASED ON YOUR SCREENSHOT
-                # Screenshot shows: /usr/lib/modules/6.18.7-arch1-1/vmlinuz
-                # We use glob to catch the version number dynamically
-                
                 search_patterns = [
-                    "/usr/lib/modules/*/vmlinuz",  # PRIMARY (Matches your screenshot)
-                    "/boot/vmlinuz-linux",         # Fallback
-                    "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux" # Fallback ISO mount
+                    "/usr/lib/modules/*/vmlinuz",  
+                    "/boot/vmlinuz-linux",         
+                    "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux"
                 ]
                 
                 kernel_src = None
-                
                 for pattern in search_patterns:
                     matches = glob.glob(pattern)
                     if matches:
-                        # Sort to get the "highest" version if multiple exist
                         matches.sort(reverse=True)
                         kernel_src = matches[0]
                         break
                 
                 if kernel_src and os.path.exists(kernel_src):
                     log(f"Found kernel source: {kernel_src}", "success")
-                    # RENAME to vmlinuz-linux so mkinitcpio presets work
                     log(f"Copying to {kernel_dst}...", "info")
                     shutil.copy(kernel_src, kernel_dst)
                     os.chmod(kernel_dst, 0o644)
                 else:
                     log(f"{COLORS['FAIL']}CRITICAL: Kernel not found!{COLORS['ENDC']}", "error")
-                    log("Please manually copy /usr/lib/modules/YOUR_VERSION/vmlinuz to /mnt/chimera_target/boot/vmlinuz-linux", "warn")
 
-                # Fix mkinitcpio.conf hooks
+                # --- NEW: Fix the Presets causing the 'Invalid option -c' error ---
+                log("Sanitizing mkinitcpio presets...", "info")
+                preset_dir = f"{MOUNT_POINT}/etc/mkinitcpio.d"
+                if os.path.exists(preset_dir):
+                    for preset in glob.glob(f"{preset_dir}/*.preset"):
+                        try:
+                            with open(preset, 'r') as f:
+                                content = f.read()
+                            
+                            # Replace the ArchISO specific config path with the standard one
+                            if "archiso.conf" in content:
+                                log(f"Fixing preset: {preset}", "info")
+                                content = content.replace("/etc/mkinitcpio.conf.d/archiso.conf", "/etc/mkinitcpio.conf")
+                                with open(preset, 'w') as f:
+                                    f.write(content)
+                        except Exception as e:
+                            log(f"Preset fix error: {e}", "warn")
+
+                # Fix main config hooks
                 conf_path = f"{MOUNT_POINT}/etc/mkinitcpio.conf"
                 try:
                     with open(conf_path, 'r') as f: config_data = f.read()
-                    
                     if "archiso" in config_data:
-                        log("Sanitizing mkinitcpio.conf hooks...", "info")
                         std_hooks = 'HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block filesystems fsck)'
                         lines = config_data.splitlines()
                         new_lines = []
@@ -304,15 +310,10 @@ class ChimeraInstaller:
                                 new_lines.append(std_hooks)
                             else:
                                 new_lines.append(line)
-                        
                         with open(conf_path, 'w') as f: f.write("\n".join(new_lines))
-                except Exception as e:
-                    log(f"Failed to patch mkinitcpio.conf: {e}", "warn")
+                except Exception: pass
 
-                # Remove archiso presets that break things
-                for f in glob.glob(f"{MOUNT_POINT}/etc/mkinitcpio.d/*.preset"):
-                    if "archiso" in f: os.remove(f)
-                
+                # Clean up old config files
                 if os.path.exists(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf"):
                     os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf")
 
