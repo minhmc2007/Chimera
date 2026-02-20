@@ -31,7 +31,6 @@ def log(msg, level="info"):
     print(f"{color}{icon} {msg}{COLORS['ENDC']}")
 
 def run_cmd(cmd, shell=False, check=True, chroot=False, ignore_error=False, env=None, stream=False):
-    # Stream output if explicitly requested OR if global debug mode is on
     show_output = stream or DEBUG_MODE
 
     if chroot:
@@ -49,10 +48,8 @@ def run_cmd(cmd, shell=False, check=True, chroot=False, ignore_error=False, env=
 
     try:
         if show_output:
-            # Print directly to console
             proc = subprocess.run(cmd, shell=shell, check=check, env=env)
         else:
-            # Capture output
             proc = subprocess.run(cmd, shell=shell, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         return proc.returncode == 0
     except subprocess.CalledProcessError as e:
@@ -86,7 +83,6 @@ class ChimeraInstaller:
         self.target_os = args.target.lower()
         self.disk = args.disk if args.disk else self._detect_disk(args.rootfs)
         
-        # Validation
         if self.args.user and not self.args.passwd:
             sys.exit(f"{COLORS['FAIL']}Error: --user requires --passwd{COLORS['ENDC']}")
 
@@ -115,6 +111,7 @@ class ChimeraInstaller:
                     self.setup_chroot_mounts()
             self.configure_system()
             self.setup_users()
+            self.install_bal_extras()
             self.run_custom_scripts()
             self.install_bootloader()
             self.finalize()
@@ -145,8 +142,8 @@ class ChimeraInstaller:
         if self.args.timezone:
             log(f"Timezone: {self.args.timezone}", "info")
         
-        if self.target_os in ["arch", "debian"] and not self.args.online:
-            print(f"\n{COLORS['WARN']}WARNING: Offline install. Cloning live ISO.{COLORS['ENDC']}")
+        if (self.target_os in ["arch", "debian", "bal"] and not self.args.online) or self.target_os == "bal":
+            print(f"\n{COLORS['WARN']}WARNING: Offline/Clone Install Mode Active.{COLORS['ENDC']}")
             time.sleep(1)
 
     def safety_check(self):
@@ -274,16 +271,12 @@ class ChimeraInstaller:
     def configure_system(self):
         log("Configuring System...", "info")
         
-        # --- 1. Branding / Hostname ---
-        # Removing "chimera-linux". Using target_os name (e.g., 'arch', 'debian')
         log(f"Setting hostname to '{self.target_os}'...", "info")
         with open(f"{MOUNT_POINT}/etc/hostname", "w") as f:
             f.write(f"{self.target_os}\n")
         
-        # --- 2. Timezone Setup ---
         if self.args.timezone:
             tz_path = f"/usr/share/zoneinfo/{self.args.timezone}"
-            # Check if it exists inside the mount (best effort)
             if os.path.exists(f"{MOUNT_POINT}{tz_path}"):
                 log(f"Setting timezone to {self.args.timezone}...", "info")
                 run_cmd(f"ln -sf {tz_path} /etc/localtime", chroot=True)
@@ -293,14 +286,12 @@ class ChimeraInstaller:
         else:
             log("No timezone specified (UTC default).", "info")
 
-        # --- 3. Distro Specifics ---
-        if self.target_os == "arch":
+        if self.target_os in ["arch", "bal"]:
             run_cmd("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", chroot=True)
             run_cmd("locale-gen", chroot=True)
             run_cmd("systemctl enable NetworkManager", chroot=True, ignore_error=True)
             
-            # --- FIX FOR OFFLINE CLONE ---
-            if not self.args.online:
+            if not self.args.online or self.target_os == "bal":
                 log("Offline Mode: Extracting Kernel...", "warn")
                 kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-linux"
                 os.makedirs(os.path.dirname(kernel_dst), exist_ok=True)
@@ -321,7 +312,6 @@ class ChimeraInstaller:
                 else:
                     log(f"{COLORS['FAIL']}CRITICAL: Kernel not found!{COLORS['ENDC']}", "error")
 
-                # Sanitize Presets
                 log("Sanitizing mkinitcpio presets...", "info")
                 preset_dir = f"{MOUNT_POINT}/etc/mkinitcpio.d"
                 if os.path.exists(preset_dir):
@@ -333,7 +323,6 @@ class ChimeraInstaller:
                                 with open(preset, 'w') as f: f.write(content)
                         except Exception: pass
 
-                # Sanitize Config
                 conf_path = f"{MOUNT_POINT}/etc/mkinitcpio.conf"
                 try:
                     with open(conf_path, 'r') as f: config_data = f.read()
@@ -356,6 +345,12 @@ class ChimeraInstaller:
                 log("Rebuilding initramfs...", "info")
                 run_cmd("mkinitcpio -P", chroot=True)
 
+            if self.target_os == "bal":
+                log("Applying Blue Archive Linux (BAL) specifics...", "info")
+                run_cmd("systemctl enable sddm", chroot=True, ignore_error=True)
+                log("Running /root/SilentSDDM/install.sh...", "info")
+                run_cmd("bash /root/SilentSDDM/install.sh", chroot=True, stream=True)
+
         elif self.target_os == "debian":
             if not shutil.which("arch-chroot"): self.setup_chroot_mounts()
             env = {"DEBIAN_FRONTEND": "noninteractive"}
@@ -366,16 +361,13 @@ class ChimeraInstaller:
 
     def setup_users(self):
         pwd = self.args.passwd
-        
-        # 1. Set ROOT Password
         if pwd:
             log("Setting ROOT password...", "info")
             run_cmd(f"echo 'root:{pwd}' | chpasswd", chroot=True)
         else:
-            log("No --passwd provided. Defaulting ROOT password to 'root' (Change immediately!).", "warn")
+            log("No --passwd provided. Defaulting ROOT password to 'root'.", "warn")
             run_cmd("echo 'root:root' | chpasswd", chroot=True)
 
-        # 2. Create User
         if self.args.user:
             user = self.args.user
             log(f"Creating user '{user}'...", "info")
@@ -386,7 +378,6 @@ class ChimeraInstaller:
                 log(f"Setting password for user '{user}'...", "info")
                 run_cmd(f"echo '{user}:{pwd}' | chpasswd", chroot=True)
 
-            # 3. Configure Sudoers
             log("Configuring sudo access...", "info")
             sudo_content = f"{user} ALL=(ALL:ALL) ALL\n"
             sudo_file = f"{MOUNT_POINT}/etc/sudoers.d/{user}"
@@ -395,10 +386,26 @@ class ChimeraInstaller:
             os.chmod(sudo_file, 0o440)
             log(f"User '{user}' added to sudoers.", "success")
 
+    def install_bal_extras(self):
+        if self.target_os == "bal" and self.args.online:
+            if not self.args.user:
+                log("Skipping BAL Online Extras: No user provided.", "warn")
+                return
+
+            log("BAL Online Mode: Installing Yay...", "HEADER")
+            log("Updating system (root)...", "info")
+            run_cmd("pacman -Syu --noconfirm", chroot=True, stream=True)
+            run_cmd("pacman -S --needed --noconfirm git base-devel", chroot=True, stream=True)
+
+            user = self.args.user
+            log(f"Building Yay (as user {user})...", "info")
+            build_cmd = f"git clone https://aur.archlinux.org/yay-bin.git /home/{user}/yay-bin && cd /home/{user}/yay-bin && makepkg -si --noconfirm"
+            full_cmd = f"su - {user} -c '{build_cmd}'"
+            run_cmd(full_cmd, chroot=True, stream=True)
+
     def run_custom_scripts(self):
         if not self.args.run: return
         log(f"Running Post-Install Command: {self.args.run}", "warn")
-        # Stream the output so user sees it in debug mode or if verbose
         run_cmd(self.args.run, chroot=True, stream=True)
 
     def _gen_fstab(self):
@@ -418,9 +425,44 @@ class ChimeraInstaller:
 
     def install_bootloader(self):
         log("Installing Bootloader...", "info")
-        target = "x86_64-efi" if self.uefi else "i386-pc"
         
-        # Changed branding from 'Chimera' to self.target_os (e.g. 'arch')
+        # --- NEW: Configure /etc/default/grub ---
+        grub_path = f"{MOUNT_POINT}/etc/default/grub"
+        if os.path.exists(grub_path):
+            log("Configuring /etc/default/grub...", "info")
+            
+            # 1. Get Pretty Name
+            pretty_name = self.target_os.capitalize()
+            os_release = f"{MOUNT_POINT}/etc/os-release"
+            if os.path.exists(os_release):
+                try:
+                    with open(os_release, 'r') as f:
+                        for line in f:
+                            if line.startswith("PRETTY_NAME="):
+                                pretty_name = line.split("=", 1)[1].strip().strip('"').strip("'")
+                                break
+                except Exception: pass
+            
+            # 2. Edit File
+            try:
+                with open(grub_path, 'r') as f: lines = f.readlines()
+                with open(grub_path, 'w') as f:
+                    for line in lines:
+                        # Set GRUB_DISTRIBUTOR to Pretty Name
+                        if line.strip().startswith("GRUB_DISTRIBUTOR="):
+                            f.write(f"GRUB_DISTRIBUTOR='{pretty_name}'\n")
+                        
+                        # Remove 'quiet' (Arch/BAL only)
+                        elif self.target_os in ["arch", "bal"] and line.strip().startswith("GRUB_CMDLINE_LINUX_DEFAULT="):
+                            new_line = line.replace("quiet", "").replace("  ", " ")
+                            f.write(new_line)
+                        else:
+                            f.write(line)
+            except Exception as e:
+                log(f"Failed to edit grub config: {e}", "warn")
+        # ----------------------------------------
+
+        target = "x86_64-efi" if self.uefi else "i386-pc"
         boot_id = self.target_os 
 
         if self.target_os == "debian":
@@ -451,23 +493,21 @@ def main():
     parser.add_argument("--boot", help="Manual: Boot partition")
     parser.add_argument("--rootfs", help="Manual: Root partition")
     parser.add_argument("--swap", help="Swap size (Auto) or partition (Manual)")
-    parser.add_argument("--target", default="arch", choices=["arch", "gentoo", "debian", "generic"])
-    parser.add_argument("--online", action="store_true", help="Use pacstrap/debootstrap instead of cloning")
+    parser.add_argument("--target", default="arch", choices=["arch", "gentoo", "debian", "generic", "bal"])
+    parser.add_argument("--online", action="store_true", help="Use pacstrap/debootstrap instead of cloning (Except BAL)")
     parser.add_argument("--init", choices=["systemd", "openrc"], default="systemd")
     parser.add_argument("--profile", choices=["cli", "desktop"], default="cli")
     
-    # New / Updated Arguments
     parser.add_argument("--user", help="Create a new user")
     parser.add_argument("--passwd", help="Password for the new user AND root")
     parser.add_argument("--run", help="Custom command to run inside chroot after install")
     parser.add_argument("--timezone", help="Set Timezone (e.g. Asia/Ho_Chi_Minh)")
-    parser.add_argument("--debug", action="store_true", help="Enable verbose output (lsblk, command stream)")
+    parser.add_argument("--debug", action="store_true", help="Enable verbose output")
     
     parser.add_argument("--i-am-very-stupid", action="store_true")
     
     args = parser.parse_args()
     
-    # Set Global Debug
     global DEBUG_MODE
     DEBUG_MODE = args.debug
 
