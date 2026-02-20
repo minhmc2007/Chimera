@@ -15,7 +15,7 @@ COLORS = {
     'WARN': '\033[93m', 'FAIL': '\033[91m', 'ENDC': '\033[0m', 'BOLD': '\033[1m'
 }
 MOUNT_POINT = "/mnt/chimera_target"
-DEBIAN_RELEASE = "bookworm" # Stable
+DEBIAN_RELEASE = "trixie" # Stable
 DEBUG_MODE = False
 
 # --- Utility Functions ---
