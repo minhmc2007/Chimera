@@ -16,7 +16,7 @@ from PySide6.QtGui import QPixmap, QIcon, QPalette, QColor, QFont, QPainter, QBr
 # --- Configuration & Constants ---
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_LOGO_PATH = os.path.join(ASSET_DIR, "logo.png")
-BG_PATH = os.path.join(ASSET_DIR, "backg.png")
+BG_PATH = os.path.join(ASSET_DIR, "/usr/share/pixmaps/backg.png")
 BACKEND_SCRIPT = os.path.join(ASSET_DIR, "main.py")
 ZONEINFO_PATH = "/usr/share/zoneinfo"
 
