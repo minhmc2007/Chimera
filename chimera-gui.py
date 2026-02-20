@@ -18,28 +18,9 @@ from PySide6.QtGui import QPixmap, QIcon, QPalette, QColor, QFont, QPainter, QBr
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_LOGO_PATH = os.path.join(ASSET_DIR, "logo.png")
 BG_PATH = os.path.join(ASSET_DIR, "/usr/share/pixmaps/backg.png")
-BACKEND_SCRIPT = os.path.join(ASSET_DIR, "/usr/share/chimera/chimera.py")
+# Using absolute path for backend script as requested
+BACKEND_SCRIPT = "/usr/share/chimera/chimera.py"
 ZONEINFO_PATH = "/usr/share/zoneinfo"
-
-# Colors
-COL_SKY_BLUE = "#87CEEB"
-COL_DEEP_SKY = "#00BFFF"
-
-# Dark Theme Palette
-D_BG_MAIN = "#31363b"
-D_BG_SIDE = "#232629"
-D_TEXT = "#eff0f1"
-D_INPUT_BG = "#232629"
-D_INPUT_BORDER = "#565a5e"
-D_HIGHLIGHT = "#3daee9"
-
-# Light Theme Palette
-L_BG_MAIN = "#eff0f1"
-L_BG_SIDE = "#e3e5e7"
-L_TEXT = "#232629"
-L_INPUT_BG = "#ffffff"
-L_INPUT_BORDER = "#bckecc"
-L_HIGHLIGHT = "#3daee9"
 
 # --- Utility Functions ---
 def get_os_release():
@@ -62,20 +43,6 @@ def get_os_release():
         print(f"Failed to read os-release: {e}")
     return info
 
-def get_system_theme():
-    try:
-        kconfig = subprocess.check_output(["kreadconfig6", "--group", "KDE", "--key", "LookAndFeelPackage"], stderr=subprocess.DEVNULL).decode().strip()
-        if "Dark" in kconfig or "dark" in kconfig: return "dark"
-        if "Light" in kconfig or "light" in kconfig: return "light"
-    except: pass
-
-    try:
-        gsettings = subprocess.check_output(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"], stderr=subprocess.DEVNULL).decode().strip()
-        if "dark" in gsettings: return "dark"
-    except: pass
-
-    return "dark"
-
 # --- Custom Widgets ---
 class StepItem(QListWidgetItem):
     def __init__(self, text):
@@ -83,32 +50,19 @@ class StepItem(QListWidgetItem):
         self.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         font = QFont()
         font.setPointSize(11)
-        font.setBold(True)
+        # font.setBold(True) # Optional: remove bold to fit system theme better
         self.setFont(font)
 
-class FancyButton(QPushButton):
-    def __init__(self, text, primary=False):
-        super().__init__(text)
-        self.setCursor(Qt.PointingHandCursor)
-        self.primary = primary
-        self.setFixedHeight(40)
-        self.setFont(QFont("Segoe UI", 10))
-
 class DebugDialog(QDialog):
-    def __init__(self, parent=None, command="", dry_run=False, is_dark=True):
+    def __init__(self, parent=None, command="", dry_run=False):
         super().__init__(parent)
         self.setWindowTitle("Installer Settings (Debug)")
         self.resize(600, 400)
-        self.is_dark = is_dark
 
         layout = QVBoxLayout(self)
         self.chk_dry_run = QCheckBox("Enable Dry Run (Do not write to disk)")
         self.chk_dry_run.setChecked(dry_run)
         layout.addWidget(self.chk_dry_run)
-
-        self.chk_force_light = QCheckBox("Switch Theme (Dark/Light)")
-        self.chk_force_light.setChecked(not is_dark)
-        layout.addWidget(self.chk_force_light)
 
         layout.addWidget(QLabel("Generated Backend Command:"))
         self.txt_cmd = QTextEdit()
@@ -119,13 +73,6 @@ class DebugDialog(QDialog):
         btn_close = QPushButton("Apply & Close")
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close)
-        self.apply_style()
-
-    def apply_style(self):
-        bg = D_BG_MAIN if self.is_dark else L_BG_MAIN
-        fg = D_TEXT if self.is_dark else L_TEXT
-        txt_bg = "#111" if self.is_dark else "#fff"
-        self.setStyleSheet(f"QDialog {{ background-color: {bg}; color: {fg}; }} QLabel, QCheckBox {{ color: {fg}; }} QTextEdit {{ background-color: {txt_bg}; color: {fg}; }}")
 
 # --- Main Window ---
 class InstallerWindow(QMainWindow):
@@ -139,7 +86,6 @@ class InstallerWindow(QMainWindow):
         self.setWindowTitle(f"Chimera Installer - {self.distro_name}")
         self.resize(1000, 700)
 
-        self.theme_mode = get_system_theme()
         self.dry_run = False
         # Initialize default data
         self.install_data = {
@@ -150,7 +96,6 @@ class InstallerWindow(QMainWindow):
         }
 
         self.setup_ui()
-        self.apply_stylesheet()
         self.check_root()
 
     def determine_target_os(self):
@@ -193,6 +138,9 @@ class InstallerWindow(QMainWindow):
         # --- Sidebar ---
         self.sidebar = QFrame()
         self.sidebar.setFixedWidth(240)
+        # Add a subtle frame shape if desired, or leave plain
+        self.sidebar.setFrameShape(QFrame.StyledPanel)
+
         side_layout = QVBoxLayout(self.sidebar)
         side_layout.setContentsMargins(0, 0, 0, 15)
         side_layout.setSpacing(10)
@@ -212,7 +160,11 @@ class InstallerWindow(QMainWindow):
             lbl_logo.setPixmap(pix)
         else:
             lbl_logo.setText("CHIMERA")
-            lbl_logo.setStyleSheet("font-size: 24px; font-weight: bold; color: white;")
+            # Minimal styling just for the fallback text to be visible
+            font = QFont()
+            font.setBold(True)
+            font.setPointSize(16)
+            lbl_logo.setFont(font)
 
         side_layout.addWidget(lbl_logo)
 
@@ -242,8 +194,11 @@ class InstallerWindow(QMainWindow):
         content_layout.setContentsMargins(40, 40, 40, 40)
 
         self.lbl_header = QLabel(f"Welcome to {self.distro_name}")
-        self.lbl_header.setFont(QFont("Segoe UI", 24, QFont.Bold))
-        self.lbl_header.setStyleSheet(f"color: {COL_SKY_BLUE}; margin-bottom: 20px;")
+        header_font = QFont() # Use system font
+        header_font.setPointSize(20)
+        header_font.setBold(True)
+        self.lbl_header.setFont(header_font)
+        # Removed color stylesheet
         content_layout.addWidget(self.lbl_header)
 
         self.pages = QStackedWidget()
@@ -251,8 +206,8 @@ class InstallerWindow(QMainWindow):
 
         nav_layout = QHBoxLayout()
         nav_layout.setContentsMargins(0, 20, 0, 0)
-        self.btn_back = FancyButton("Back")
-        self.btn_next = FancyButton("Next", primary=True)
+        self.btn_back = QPushButton("Back")
+        self.btn_next = QPushButton("Next")
         self.btn_back.clicked.connect(self.go_back)
         self.btn_next.clicked.connect(self.go_next)
 
@@ -276,13 +231,17 @@ class InstallerWindow(QMainWindow):
             lbl_hero.setPixmap(pix)
         else:
             lbl_hero.setText(f"{self.distro_name}\nInstaller")
-            lbl_hero.setStyleSheet("font-size: 30px; font-weight: bold; color: #555; border: 2px dashed #555; padding: 60px;")
+            # Minimal frame for fallback
+            lbl_hero.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
+            lbl_hero.setFixedSize(700, 350)
 
         welcome_str = f"This wizard will guide you through the installation of {self.distro_name}."
         lbl_text = QLabel(welcome_str)
         lbl_text.setAlignment(Qt.AlignCenter)
         lbl_text.setWordWrap(True)
-        lbl_text.setStyleSheet("font-size: 15px; margin-top: 30px;")
+        # Minimal margin
+        lbl_text.setContentsMargins(0, 20, 0, 0)
+
         vbox.addStretch()
         vbox.addWidget(lbl_hero)
         vbox.addWidget(lbl_text)
@@ -371,7 +330,6 @@ class InstallerWindow(QMainWindow):
         vbox.addWidget(info)
         btn_cfdisk = QPushButton(" Launch Partition Tool (cfdisk)")
         btn_cfdisk.setIcon(QIcon.fromTheme("utilities-terminal"))
-        btn_cfdisk.setStyleSheet(f"background: {COL_DEEP_SKY}; color: white; padding: 10px; font-weight: bold; border-radius: 5px;")
         btn_cfdisk.clicked.connect(self.launch_cfdisk)
         vbox.addWidget(btn_cfdisk)
 
@@ -426,7 +384,11 @@ class InstallerWindow(QMainWindow):
         self.pbar = QProgressBar()
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
-        self.txt_log.setStyleSheet("font-family: monospace; font-size: 11px;")
+        # Use a generic monospace font family
+        font_mono = QFont("Monospace")
+        font_mono.setStyleHint(QFont.Monospace)
+        self.txt_log.setFont(font_mono)
+
         vbox.addStretch()
         vbox.addWidget(self.lbl_progress)
         vbox.addWidget(self.pbar)
@@ -520,54 +482,6 @@ class InstallerWindow(QMainWindow):
     def toggle_swap_input(self):
         self.wid_swap.setVisible(self.rad_erase.isChecked())
 
-    def apply_stylesheet(self):
-        is_dark = self.theme_mode == "dark"
-        bg_main = D_BG_MAIN if is_dark else L_BG_MAIN
-        bg_side = D_BG_SIDE if is_dark else L_BG_SIDE
-        text = D_TEXT if is_dark else L_TEXT
-        input_bg = D_INPUT_BG if is_dark else L_INPUT_BG
-        input_border = D_INPUT_BORDER if is_dark else L_INPUT_BORDER
-        highlight = D_HIGHLIGHT if is_dark else L_HIGHLIGHT
-
-        css = f"""
-        QMainWindow, QWidget {{ background-color: {bg_main}; color: {text}; }}
-        QFrame {{ border: none; }}
-        QListWidget {{ background-color: {bg_side}; outline: 0; }}
-        QListWidget::item {{ color: #888; padding: 15px; border-left: 4px solid transparent; }}
-        QListWidget::item:selected {{ color: {text}; background: {bg_main}; border-left: 4px solid {COL_SKY_BLUE}; }}
-        QLabel, QCheckBox, QRadioButton {{ color: {text}; font-size: 14px; background: transparent; }}
-        QLineEdit, QComboBox, QSpinBox {{
-            background-color: {input_bg}; color: {text};
-            border: 1px solid {input_border}; padding: 8px; border-radius: 4px; font-size: 13px;
-        }}
-        QLineEdit:focus, QComboBox:focus {{ border: 1px solid {COL_SKY_BLUE}; }}
-        QComboBox::drop-down {{ border: none; width: 20px; }}
-        QComboBox QAbstractItemView {{
-            background-color: {input_bg}; color: {text};
-            selection-background-color: {COL_SKY_BLUE}; selection-color: black;
-            border: 1px solid {input_border};
-        }}
-        QGroupBox {{
-            border: 1px solid {input_border}; margin-top: 20px; font-weight: bold; border-radius: 5px; background: transparent;
-        }}
-        QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {COL_SKY_BLUE}; }}
-        QPushButton {{
-            background-color: {input_bg}; color: {text};
-            border: 1px solid {input_border}; border-radius: 4px; padding: 6px;
-        }}
-        QPushButton:hover {{ background-color: {highlight}; color: white; border: 1px solid {highlight}; }}
-        QToolButton {{ color: {text}; border: none; background: transparent; font-size: 20px; }}
-        QToolButton:hover {{ color: {COL_SKY_BLUE}; }}
-        QScrollBar:vertical {{ background: {bg_main}; width: 10px; }}
-        QScrollBar::handle:vertical {{ background: #555; border-radius: 5px; }}
-        QPushButton[primary="true"] {{
-            background-color: {COL_SKY_BLUE}; color: #000; font-weight: bold; border: none;
-        }}
-        QPushButton[primary="true"]:hover {{ background-color: {COL_DEEP_SKY}; }}
-        """
-        self.setStyleSheet(css)
-        self.sidebar.setStyleSheet(f"background-color: {bg_side};")
-
     def refresh_disks(self):
         self.cmb_disk.clear()
         try:
@@ -656,17 +570,35 @@ class InstallerWindow(QMainWindow):
         return cmd
 
     def open_debug_settings(self):
-        try:
-            # Disk Setup page index is now 3
-            if self.pages.currentIndex() == 3: self.install_data['disk'] = self.cmb_disk.currentData()
-        except: pass
-        dlg = DebugDialog(self, " ".join(self.get_cmd_list()), self.dry_run, self.theme_mode=="dark")
+        # Update data from widgets immediately to ensure debug command is fresh
+        # Page 1: Install Type
+        if self.rad_offline.isChecked(): self.install_data['install_type'] = "offline"
+        else: self.install_data['install_type'] = "online"
+
+        # Page 2: Location
+        if self.cmb_city.currentData():
+             self.install_data['tz'] = self.cmb_city.currentData()
+
+        # Page 3: Disk (Whole)
+        if self.cmb_disk.currentData():
+             self.install_data['disk'] = self.cmb_disk.currentData()
+        self.install_data['method'] = "whole" if self.rad_erase.isChecked() else "manual"
+        self.install_data['swap_size'] = self.spin_swap.value()
+
+        # Page 4: Partitions (Manual)
+        if self.cmb_root.currentData(): self.install_data['root'] = self.cmb_root.currentData()
+        if self.cmb_boot.currentData(): self.install_data['boot'] = self.cmb_boot.currentData()
+        if self.cmb_swap.currentData(): self.install_data['swap'] = self.cmb_swap.currentData()
+
+        # Page 5: Users
+        self.install_data['user'] = self.inp_user.text()
+        self.install_data['pass'] = self.inp_pass.text()
+        self.install_data['host'] = self.inp_host.text()
+
+        # Capture dry_run state for dialog init
+        dlg = DebugDialog(self, " ".join(self.get_cmd_list()), self.dry_run)
         if dlg.exec():
             self.dry_run = dlg.chk_dry_run.isChecked()
-            new_theme = "light" if dlg.chk_force_light.isChecked() else "dark"
-            if new_theme != self.theme_mode:
-                self.theme_mode = new_theme
-                self.apply_stylesheet()
 
     def go_next(self):
         idx = self.pages.currentIndex()
@@ -757,19 +689,20 @@ class InstallerWindow(QMainWindow):
 
         if idx == 6:
             self.btn_next.setText("Install Now")
-            self.btn_next.setStyleSheet(f"background-color: #e74c3c; color: white; font-weight: bold; border-radius: 4px; padding: 6px;")
+            # Removed custom coloring for Install button
         else:
             self.btn_next.setText("Next")
-            self.btn_next.setStyleSheet(f"background-color: {COL_SKY_BLUE}; color: black; font-weight: bold; border-radius: 4px; padding: 6px;")
+            # Removed custom coloring for Next button
 
     def generate_summary(self):
         d = self.install_data
+        # Removed hardcoded colors from summary HTML
         html = f"""
-        <h3 style="color:{COL_SKY_BLUE}">System Configuration</h3>
+        <h3>System Configuration</h3>
         <b>Distro:</b> {self.distro_name}<br><b>Hostname:</b> {d['host']}<br>
         <b>Timezone:</b> {d['tz']}<br><b>User:</b> {d['user']}<br>
         <b>Install Mode:</b> {d['install_type'].capitalize()}<br>
-        <h3 style="color:{COL_SKY_BLUE}">Storage Configuration</h3>
+        <h3>Storage Configuration</h3>
         """
         if d['method'] == 'whole': html += f"<b>Mode:</b> Erase Whole Disk<br><b>Target:</b> {d['disk']}<br><b>Swap:</b> {d['swap_size']} GB"
         else: html += f"<b>Mode:</b> Manual Partitioning<br><b>Root:</b> {d['root']}<br><b>Boot:</b> {d['boot']}<br><b>Swap:</b> {d['swap']}"
@@ -820,7 +753,8 @@ class InstallerWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyle("Fusion")
+    # Removing force style to respect system settings (Fusion, Breeze, etc.)
+    # app.setStyle("Fusion")
     win = InstallerWindow()
     win.show()
     sys.exit(app.exec())
