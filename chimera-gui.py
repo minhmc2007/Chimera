@@ -4,11 +4,12 @@ import os
 import subprocess
 import json
 import shutil
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QLabel, QStackedWidget, QPushButton, 
-                               QRadioButton, QComboBox, QLineEdit, QCheckBox, 
+import socket
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                               QHBoxLayout, QLabel, QStackedWidget, QPushButton,
+                               QRadioButton, QComboBox, QLineEdit, QCheckBox,
                                QFrame, QListWidget, QListWidgetItem, QMessageBox,
-                               QTextEdit, QProgressBar, QSpinBox, QGroupBox, 
+                               QTextEdit, QProgressBar, QSpinBox, QGroupBox,
                                QDialog, QToolButton, QSizePolicy, QScrollArea, QAbstractItemView)
 from PySide6.QtCore import Qt, QSize, QProcess, QTimer, QSettings, QPoint
 from PySide6.QtGui import QPixmap, QIcon, QPalette, QColor, QFont, QPainter, QBrush, QTextCursor
@@ -17,7 +18,7 @@ from PySide6.QtGui import QPixmap, QIcon, QPalette, QColor, QFont, QPainter, QBr
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_LOGO_PATH = os.path.join(ASSET_DIR, "logo.png")
 BG_PATH = os.path.join(ASSET_DIR, "/usr/share/pixmaps/backg.png")
-BACKEND_SCRIPT = os.path.join(ASSET_DIR, "main.py")
+BACKEND_SCRIPT = os.path.join(ASSET_DIR, "/usr/share/chimera/chimera.py")
 ZONEINFO_PATH = "/usr/share/zoneinfo"
 
 # Colors
@@ -67,12 +68,12 @@ def get_system_theme():
         if "Dark" in kconfig or "dark" in kconfig: return "dark"
         if "Light" in kconfig or "light" in kconfig: return "light"
     except: pass
-    
+
     try:
         gsettings = subprocess.check_output(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"], stderr=subprocess.DEVNULL).decode().strip()
         if "dark" in gsettings: return "dark"
     except: pass
-        
+
     return "dark"
 
 # --- Custom Widgets ---
@@ -99,12 +100,12 @@ class DebugDialog(QDialog):
         self.setWindowTitle("Installer Settings (Debug)")
         self.resize(600, 400)
         self.is_dark = is_dark
-        
+
         layout = QVBoxLayout(self)
         self.chk_dry_run = QCheckBox("Enable Dry Run (Do not write to disk)")
         self.chk_dry_run.setChecked(dry_run)
         layout.addWidget(self.chk_dry_run)
-        
+
         self.chk_force_light = QCheckBox("Switch Theme (Dark/Light)")
         self.chk_force_light.setChecked(not is_dark)
         layout.addWidget(self.chk_force_light)
@@ -114,7 +115,7 @@ class DebugDialog(QDialog):
         self.txt_cmd.setPlainText(command)
         self.txt_cmd.setReadOnly(True)
         layout.addWidget(self.txt_cmd)
-        
+
         btn_close = QPushButton("Apply & Close")
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close)
@@ -130,28 +131,57 @@ class DebugDialog(QDialog):
 class InstallerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        
+
         self.os_info = get_os_release()
         self.distro_name = self.os_info.get("PRETTY_NAME", "Linux Distro")
-        self.distro_id = self.os_info.get("ID", "arch")
-        
+        self.determine_target_os()
+
         self.setWindowTitle(f"Chimera Installer - {self.distro_name}")
         self.resize(1000, 700)
-        
+
         self.theme_mode = get_system_theme()
         self.dry_run = False
+        # Initialize default data
         self.install_data = {
-            "disk": None, "root": None, "boot": None, "swap": None, "swap_size": 0,
-            "method": "whole", "user": "", "pass": "", "host": "chimera-pc", "tz": "UTC"
+            "install_type": "online",
+            "disk": None, "root": None, "boot": None, "swap": None,
+            "swap_size": 0, "method": "whole",
+            "user": "", "pass": "", "host": "chimera-pc", "tz": "UTC"
         }
 
         self.setup_ui()
         self.apply_stylesheet()
         self.check_root()
 
+    def determine_target_os(self):
+        distro_name = self.os_info.get("NAME", "Linux")
+        supported_targets = ["arch", "gentoo", "debian", "bal"]
+        self.target_os = "generic"
+
+        if "Blue Archive Linux" in distro_name:
+            self.target_os = "bal"
+        else:
+            distro_id = self.os_info.get("ID")
+            if distro_id in supported_targets:
+                self.target_os = distro_id
+            else:
+                distro_id_like = self.os_info.get("ID_LIKE")
+                if distro_id_like in supported_targets:
+                    self.target_os = distro_id_like
+
     def check_root(self):
         if os.geteuid() != 0:
             QMessageBox.warning(self, "Root Required", "Running without root privileges.\nDisk operations will fail.")
+
+    def check_internet(self):
+        """Checks for internet connection using a simple socket connection (No dependencies)."""
+        try:
+            # Connecting to Cloudflare's public DNS port 53
+            socket.create_connection(("1.1.1.1", 53), timeout=3)
+            return True
+        except OSError:
+            pass
+        return False
 
     def setup_ui(self):
         central = QWidget()
@@ -172,33 +202,33 @@ class InstallerWindow(QMainWindow):
         lbl_logo = QLabel()
         lbl_logo.setAlignment(Qt.AlignCenter)
         lbl_logo.setFixedHeight(140)
-        
+
         final_logo = None
         if os.path.exists(sys_logo_path): final_logo = sys_logo_path
         elif os.path.exists(LOCAL_LOGO_PATH): final_logo = LOCAL_LOGO_PATH
-            
+
         if final_logo:
             pix = QPixmap(final_logo).scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             lbl_logo.setPixmap(pix)
         else:
             lbl_logo.setText("CHIMERA")
             lbl_logo.setStyleSheet("font-size: 24px; font-weight: bold; color: white;")
-            
+
         side_layout.addWidget(lbl_logo)
 
         self.step_list = QListWidget()
         self.step_list.setFocusPolicy(Qt.NoFocus)
-        steps = ["Welcome", "Location", "Disk Setup", "Partitions", "Users", "Summary", "Install"]
+        steps = ["Welcome", "Install Type", "Location", "Disk Setup", "Partitions", "Users", "Summary", "Install"]
         for s in steps: self.step_list.addItem(StepItem(s))
         self.step_list.setCurrentRow(0)
         side_layout.addWidget(self.step_list)
 
         self.btn_debug = QToolButton()
-        self.btn_debug.setText("⚙") 
+        self.btn_debug.setText("⚙")
         self.btn_debug.setCursor(Qt.PointingHandCursor)
         self.btn_debug.clicked.connect(self.open_debug_settings)
         self.btn_debug.setFixedSize(40, 40)
-        
+
         bot_layout = QHBoxLayout()
         bot_layout.setContentsMargins(15, 0, 0, 0)
         bot_layout.addWidget(self.btn_debug)
@@ -225,7 +255,7 @@ class InstallerWindow(QMainWindow):
         self.btn_next = FancyButton("Next", primary=True)
         self.btn_back.clicked.connect(self.go_back)
         self.btn_next.clicked.connect(self.go_next)
-        
+
         nav_layout.addStretch()
         nav_layout.addWidget(self.btn_back)
         nav_layout.addWidget(self.btn_next)
@@ -247,8 +277,8 @@ class InstallerWindow(QMainWindow):
         else:
             lbl_hero.setText(f"{self.distro_name}\nInstaller")
             lbl_hero.setStyleSheet("font-size: 30px; font-weight: bold; color: #555; border: 2px dashed #555; padding: 60px;")
-        
-        welcome_str = f"This wizard will guide you through the installation of {self.distro_name}.\n\nPlease ensure you are connected to the internet."
+
+        welcome_str = f"This wizard will guide you through the installation of {self.distro_name}."
         lbl_text = QLabel(welcome_str)
         lbl_text.setAlignment(Qt.AlignCenter)
         lbl_text.setWordWrap(True)
@@ -259,26 +289,51 @@ class InstallerWindow(QMainWindow):
         vbox.addStretch()
         self.pages.addWidget(p_welcome)
 
-        # 1. Location (Improved)
+        # 1. Install Type
+        p_type = QWidget()
+        vbox = QVBoxLayout(p_type)
+        vbox.addWidget(QLabel("Please select your preferred installation method:"))
+
+        grp_type = QGroupBox("Installation Mode")
+        v_type = QVBoxLayout(grp_type)
+
+        self.rad_online = QRadioButton("Online Install (Downloads the latest packages via Internet)")
+        self.rad_offline = QRadioButton("Offline Install (Uses the local packages/SquashFS)")
+        self.rad_online.setChecked(True)
+
+        v_type.addWidget(self.rad_online)
+        v_type.addWidget(self.rad_offline)
+
+        # Check target to disable offline if necessary
+        if self.target_os == "gentoo":
+            self.rad_offline.setEnabled(False)
+            self.rad_offline.setText("Offline Install (Disabled: Gentoo requires Stage3 over Internet)")
+        elif self.target_os == "generic":
+            self.rad_offline.setEnabled(False)
+            self.rad_offline.setText("Offline Install (Disabled: Target 'generic' does not support offline mode)")
+
+        vbox.addWidget(grp_type)
+        vbox.addStretch()
+        self.pages.addWidget(p_type)
+
+        # 2. Location
         p_loc = QWidget()
         vbox = QVBoxLayout(p_loc)
-        
+
         vbox.addWidget(QLabel("Select Region:"))
         self.cmb_region = QComboBox()
         self.cmb_region.currentTextChanged.connect(self.populate_cities)
         vbox.addWidget(self.cmb_region)
-        
+
         vbox.addWidget(QLabel("Select Zone/City:"))
         self.cmb_city = QComboBox()
         vbox.addWidget(self.cmb_city)
-        
-        # Populate Timezones
+
         self.populate_regions()
-        
         vbox.addStretch()
         self.pages.addWidget(p_loc)
 
-        # 2. Disk Setup
+        # 3. Disk Setup
         p_disk = QWidget()
         vbox = QVBoxLayout(p_disk)
         vbox.addWidget(QLabel("Select Storage Drive:"))
@@ -309,7 +364,7 @@ class InstallerWindow(QMainWindow):
         vbox.addStretch()
         self.pages.addWidget(p_disk)
 
-        # 3. Partitions
+        # 4. Partitions
         p_part = QWidget()
         vbox = QVBoxLayout(p_part)
         info = QLabel("<b>Partition Manager</b><br>Launch the tool below to modify partitions, then Refresh and assign mount points.")
@@ -338,7 +393,7 @@ class InstallerWindow(QMainWindow):
         vbox.addStretch()
         self.pages.addWidget(p_part)
 
-        # 4. Users
+        # 5. Users
         p_user = QWidget()
         form = QVBoxLayout(p_user)
         self.inp_host = QLineEdit("chimera-pc")
@@ -354,7 +409,7 @@ class InstallerWindow(QMainWindow):
         form.addStretch()
         self.pages.addWidget(p_user)
 
-        # 5. Summary
+        # 6. Summary
         p_sum = QWidget()
         vbox = QVBoxLayout(p_sum)
         self.txt_sum = QTextEdit()
@@ -363,7 +418,7 @@ class InstallerWindow(QMainWindow):
         vbox.addWidget(self.txt_sum)
         self.pages.addWidget(p_sum)
 
-        # 6. Install
+        # 7. Install
         p_inst = QWidget()
         vbox = QVBoxLayout(p_inst)
         self.lbl_progress = QLabel("Waiting to start...")
@@ -384,14 +439,14 @@ class InstallerWindow(QMainWindow):
         """Step 1: Populate Regions from directories in /usr/share/zoneinfo"""
         self.cmb_region.blockSignals(True)
         self.cmb_region.clear()
-        
+
         if not os.path.exists(ZONEINFO_PATH):
             self.cmb_region.addItem("UTC")
             return
 
         regions = []
         has_global_files = False
-        
+
         # Scan directories
         for entry in os.listdir(ZONEINFO_PATH):
             full_path = os.path.join(ZONEINFO_PATH, entry)
@@ -404,50 +459,46 @@ class InstallerWindow(QMainWindow):
 
         regions.sort()
         if has_global_files:
-            regions.insert(0, "Global") # For root files like UTC, Japan, Turkey
-        
+            regions.insert(0, "Global")
+
         self.cmb_region.addItems(regions)
         self.cmb_region.blockSignals(False)
-        
+
         # Auto-Select based on /etc/localtime
         try:
             if os.path.islink("/etc/localtime"):
-                real_path = os.readlink("/etc/localtime") # e.g., /usr/share/zoneinfo/Asia/Ho_Chi_Minh
+                real_path = os.readlink("/etc/localtime")
                 parts = real_path.split("zoneinfo/")
                 if len(parts) > 1:
-                    tz_str = parts[1] # Asia/Ho_Chi_Minh
+                    tz_str = parts[1]
                     if "/" in tz_str:
                         region, city = tz_str.split("/", 1)
                         idx = self.cmb_region.findText(region)
                         if idx >= 0:
                             self.cmb_region.setCurrentIndex(idx)
                             self.populate_cities(region)
-                            # Now select city
                             idx_c = self.cmb_city.findData(tz_str)
                             if idx_c >= 0: self.cmb_city.setCurrentIndex(idx_c)
                     else:
-                        # It's a global file like UTC
                         self.cmb_region.setCurrentText("Global")
                         idx_c = self.cmb_city.findText(tz_str)
                         if idx_c >= 0: self.cmb_city.setCurrentIndex(idx_c)
         except:
             pass
-            
+
         if self.cmb_city.count() == 0:
             self.populate_cities(self.cmb_region.currentText())
 
     def populate_cities(self, region):
         """Step 2: Populate Cities based on Region"""
         self.cmb_city.clear()
-        
+
         if region == "Global":
-            # List files in root
             for entry in sorted(os.listdir(ZONEINFO_PATH)):
                 full = os.path.join(ZONEINFO_PATH, entry)
                 if os.path.isfile(full) and entry[0].isupper() and not entry.endswith(".tab"):
-                    self.cmb_city.addItem(entry, entry) # Text=Entry, Data=Entry
+                    self.cmb_city.addItem(entry, entry)
         else:
-            # Recursively find files in subdir
             base_path = os.path.join(ZONEINFO_PATH, region)
             if not os.path.exists(base_path): return
 
@@ -455,21 +506,12 @@ class InstallerWindow(QMainWindow):
             for root, dirs, files in os.walk(base_path):
                 for f in files:
                     if f.startswith(".") or f.endswith(".tab"): continue
-                    
+
                     abs_path = os.path.join(root, f)
-                    # Relative path from base_path (e.g., Argentina/Buenos_Aires)
-                    # If base_path is .../America, and file is .../America/Argentina/Buenos_Aires
-                    # rel_path is Argentina/Buenos_Aires
-                    # But we want the full TZ string for data: America/Argentina/Buenos_Aires
-                    
-                    # Display name: Argentina/Buenos_Aires
                     rel_display = os.path.relpath(abs_path, base_path)
-                    
-                    # Backend Data: Region/Display
                     full_tz = f"{region}/{rel_display}"
-                    
                     zones.append((rel_display, full_tz))
-            
+
             zones.sort(key=lambda x: x[0])
             for display, data in zones:
                 self.cmb_city.addItem(display, data)
@@ -494,8 +536,8 @@ class InstallerWindow(QMainWindow):
         QListWidget::item {{ color: #888; padding: 15px; border-left: 4px solid transparent; }}
         QListWidget::item:selected {{ color: {text}; background: {bg_main}; border-left: 4px solid {COL_SKY_BLUE}; }}
         QLabel, QCheckBox, QRadioButton {{ color: {text}; font-size: 14px; background: transparent; }}
-        QLineEdit, QComboBox, QSpinBox {{ 
-            background-color: {input_bg}; color: {text}; 
+        QLineEdit, QComboBox, QSpinBox {{
+            background-color: {input_bg}; color: {text};
             border: 1px solid {input_border}; padding: 8px; border-radius: 4px; font-size: 13px;
         }}
         QLineEdit:focus, QComboBox:focus {{ border: 1px solid {COL_SKY_BLUE}; }}
@@ -505,21 +547,21 @@ class InstallerWindow(QMainWindow):
             selection-background-color: {COL_SKY_BLUE}; selection-color: black;
             border: 1px solid {input_border};
         }}
-        QGroupBox {{ 
+        QGroupBox {{
             border: 1px solid {input_border}; margin-top: 20px; font-weight: bold; border-radius: 5px; background: transparent;
         }}
         QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; color: {COL_SKY_BLUE}; }}
-        QPushButton {{ 
-            background-color: {input_bg}; color: {text}; 
-            border: 1px solid {input_border}; border-radius: 4px; padding: 6px; 
+        QPushButton {{
+            background-color: {input_bg}; color: {text};
+            border: 1px solid {input_border}; border-radius: 4px; padding: 6px;
         }}
         QPushButton:hover {{ background-color: {highlight}; color: white; border: 1px solid {highlight}; }}
         QToolButton {{ color: {text}; border: none; background: transparent; font-size: 20px; }}
         QToolButton:hover {{ color: {COL_SKY_BLUE}; }}
         QScrollBar:vertical {{ background: {bg_main}; width: 10px; }}
         QScrollBar::handle:vertical {{ background: #555; border-radius: 5px; }}
-        QPushButton[primary="true"] {{ 
-            background-color: {COL_SKY_BLUE}; color: #000; font-weight: bold; border: none; 
+        QPushButton[primary="true"] {{
+            background-color: {COL_SKY_BLUE}; color: #000; font-weight: bold; border: none;
         }}
         QPushButton[primary="true"]:hover {{ background-color: {COL_DEEP_SKY}; }}
         """
@@ -582,29 +624,41 @@ class InstallerWindow(QMainWindow):
     def get_cmd_list(self):
         cmd = ["python3", "-u", BACKEND_SCRIPT]
         d = self.install_data
+
+        # Disk/Partition Arguments
         if d['method'] == 'whole':
             disk_val = d['disk'] if d['disk'] else "[NO_DISK]"
             cmd.extend(["--disk", disk_val])
-            if d.get('swap_size', 0) > 0: cmd.extend(["--swap", f"{d['swap_size']}G"])
+            if d.get('swap_size', 0) > 0:
+                cmd.extend(["--swap", f"{d['swap_size']}G"])
         else:
             root_val = d['root'] if d['root'] else "[NO_ROOT]"
             boot_val = d['boot'] if d['boot'] else "[NO_BOOT]"
             cmd.extend(["--rootfs", root_val])
             cmd.extend(["--boot", boot_val])
-            if d['swap']: cmd.extend(["--swap", d['swap']])
+            if d['swap']:
+                cmd.extend(["--swap", d['swap']])
+
+        # User/System Arguments
         cmd.extend(["--user", d['user']])
         cmd.extend(["--passwd", d['pass']])
         cmd.extend(["--timezone", d['tz']])
-        distro_name = self.os_info.get("NAME", "Linux")
-        target_os = "bal" if "Blue Archive Linux" in distro_name else self.os_info.get("ID", "arch")
-        cmd.extend(["--target", target_os])
-        cmd.append("--i-am-very-stupid") 
+        cmd.extend(["--target", self.target_os])
+
+        # Online/Offline Argument
+        if d.get("install_type") == "offline":
+            cmd.append("--offline")
+        if d.get("install_type") == "online":
+            cmd.append("--online")
+
+        cmd.append("--i-am-very-stupid")
         cmd.append("--debug")
         return cmd
 
     def open_debug_settings(self):
         try:
-            if self.pages.currentIndex() == 2: self.install_data['disk'] = self.cmb_disk.currentData()
+            # Disk Setup page index is now 3
+            if self.pages.currentIndex() == 3: self.install_data['disk'] = self.cmb_disk.currentData()
         except: pass
         dlg = DebugDialog(self, " ".join(self.get_cmd_list()), self.dry_run, self.theme_mode=="dark")
         if dlg.exec():
@@ -616,50 +670,77 @@ class InstallerWindow(QMainWindow):
 
     def go_next(self):
         idx = self.pages.currentIndex()
+
+        # Page 1: Install Type
         if idx == 1:
-            # Capture Timezone Data (The secret data in cmb_city contains the full path)
-            self.install_data['tz'] = self.cmb_city.currentData()
-            
+            self.install_data['install_type'] = "offline" if self.rad_offline.isChecked() else "online"
+
+            if self.install_data['install_type'] == "online":
+                while not self.check_internet():
+                    msg = QMessageBox(self)
+                    msg.setIcon(QMessageBox.Warning)
+                    msg.setWindowTitle("No Internet Connection")
+                    msg.setText("An active internet connection is required for an Online Install.\nPlease connect to a network and try again.")
+                    btn_retry = msg.addButton("Retry", QMessageBox.AcceptRole)
+                    btn_cancel = msg.addButton("Cancel", QMessageBox.RejectRole)
+                    msg.exec()
+
+                    if msg.clickedButton() == btn_cancel:
+                        return # User cancelled, stay on current page
+
+        # Page 2: Location
         if idx == 2:
+            self.install_data['tz'] = self.cmb_city.currentData()
+
+        # Page 3: Disk Setup
+        if idx == 3:
             self.install_data['disk'] = self.cmb_disk.currentData()
             if not self.install_data['disk']: return QMessageBox.warning(self, "Error", "Please select a disk.")
             self.install_data['method'] = "whole" if self.rad_erase.isChecked() else "manual"
             self.install_data['swap_size'] = self.spin_swap.value()
             if self.install_data['method'] == "whole":
-                self.pages.setCurrentIndex(4) 
-                self.step_list.setCurrentRow(4)
+                self.pages.setCurrentIndex(5) # Skip Partitions, jump to Users
+                self.step_list.setCurrentRow(5)
                 self.update_nav()
                 return
             else: self.populate_partitions()
-        if idx == 3: 
+
+        # Page 4: Partitions
+        if idx == 4:
             r, b = self.cmb_root.currentData(), self.cmb_boot.currentData()
             if not r or not b: return QMessageBox.warning(self, "Error", "Root and Boot partitions required.")
             if r == b: return QMessageBox.warning(self, "Error", "Root and Boot cannot be the same.")
             self.install_data['root'] = r
             self.install_data['boot'] = b
             self.install_data['swap'] = self.cmb_swap.currentData()
-        if idx == 4:
+
+        # Page 5: Users
+        if idx == 5:
             u, p = self.inp_user.text(), self.inp_pass.text()
             if not u or not p: return QMessageBox.warning(self, "Error", "User and Password required.")
             self.install_data['user'] = u
             self.install_data['pass'] = p
             self.install_data['host'] = self.inp_host.text()
             self.generate_summary()
-        if idx == 5:
+
+        # Page 6: Summary -> Install
+        if idx == 6:
             if not self.dry_run:
                 if QMessageBox.question(self, "Confirm", "Disk changes are permanent. Proceed?", QMessageBox.Yes|QMessageBox.No) != QMessageBox.Yes: return
             self.start_install()
             return
+
         if idx < self.pages.count() - 1:
             self.pages.setCurrentIndex(idx + 1)
             self.step_list.setCurrentRow(idx + 1)
+
         self.update_nav()
 
     def go_back(self):
         idx = self.pages.currentIndex()
-        if idx == 4 and self.install_data['method'] == 'whole':
-            self.pages.setCurrentIndex(2)
-            self.step_list.setCurrentRow(2)
+        if idx == 5 and self.install_data['method'] == 'whole':
+            self.pages.setCurrentIndex(3)
+            self.step_list.setCurrentRow(3)
         elif idx > 0:
             self.pages.setCurrentIndex(idx - 1)
             self.step_list.setCurrentRow(idx - 1)
@@ -670,9 +751,11 @@ class InstallerWindow(QMainWindow):
         if idx < self.step_list.count():
              self.step_list.setCurrentRow(idx)
              self.lbl_header.setText(self.step_list.item(idx).text())
-        self.btn_back.setVisible(idx > 0 and idx < 6)
-        self.btn_next.setVisible(idx < 6)
-        if idx == 5:
+
+        self.btn_back.setVisible(idx > 0 and idx < 7)
+        self.btn_next.setVisible(idx < 7)
+
+        if idx == 6:
             self.btn_next.setText("Install Now")
             self.btn_next.setStyleSheet(f"background-color: #e74c3c; color: white; font-weight: bold; border-radius: 4px; padding: 6px;")
         else:
@@ -685,6 +768,7 @@ class InstallerWindow(QMainWindow):
         <h3 style="color:{COL_SKY_BLUE}">System Configuration</h3>
         <b>Distro:</b> {self.distro_name}<br><b>Hostname:</b> {d['host']}<br>
         <b>Timezone:</b> {d['tz']}<br><b>User:</b> {d['user']}<br>
+        <b>Install Mode:</b> {d['install_type'].capitalize()}<br>
         <h3 style="color:{COL_SKY_BLUE}">Storage Configuration</h3>
         """
         if d['method'] == 'whole': html += f"<b>Mode:</b> Erase Whole Disk<br><b>Target:</b> {d['disk']}<br><b>Swap:</b> {d['swap_size']} GB"
@@ -692,16 +776,18 @@ class InstallerWindow(QMainWindow):
         self.txt_sum.setHtml(html)
 
     def start_install(self):
-        self.pages.setCurrentIndex(6)
-        self.step_list.setCurrentRow(6)
+        self.pages.setCurrentIndex(7)
+        self.step_list.setCurrentRow(7)
         self.update_nav()
         cmd = self.get_cmd_list()
+
         if self.dry_run:
             self.txt_log.append("--- DRY RUN MODE ---")
             self.txt_log.append(f"Command:\n{' '.join(cmd)}")
             self.pbar.setValue(100)
             self.lbl_progress.setText("Dry Run Complete")
             return
+
         self.process = QProcess()
         self.process.setProcessChannelMode(QProcess.MergedChannels)
         self.process.readyReadStandardOutput.connect(self.read_output)

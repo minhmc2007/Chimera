@@ -1,11 +1,11 @@
-# Maintainer: minhmc2007 <your-email@example.com>
+# Maintainer: minhmc2007 <quangminh21072010@gmail.com>
 pkgname=chimera-installer
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="A custom Linux installer written in Python and PySide6"
 arch=('any')
-url="https://github.com/minhmc2007/Chimera" # Change this to your actual repo if applicable
-license=('MIT') # Assuming MIT based on the LICENSE file presence
+url="https://github.com/minhmc2007/Chimera" 
+license=('MIT') 
 depends=('python' 'pyside6')
 makedepends=()
 
@@ -18,9 +18,6 @@ source=("local://chimera.py"
         "local://LICENSE")
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
-# NOTE: If you push this to GitHub, change the source array to:
-# source=("git+https://github.com/minhmc2007/Chimera.git")
-# And change the package() function to `cd "$srcdir/Chimera"` first.
 
 package() {
     # 1. Create necessary system directories
@@ -34,7 +31,7 @@ package() {
     # 2. Install application files to /usr/share/chimera
     install -m755 "$srcdir/chimera.py" "$pkgdir/usr/share/chimera/chimera.py"
     install -m755 "$srcdir/chimera-gui.py" "$pkgdir/usr/share/chimera/chimera-gui.py"
-    install -m644 "$srcdir/logo.png" "$pkgdir/usr/share/chimera/logo.png"
+    install -m644 "$srcdir/logo.png" "$pkgdir/usr/share/pixmaps/logo.png"
     install -m644 "$srcdir/backg.png" "$pkgdir/usr/share/pixmaps/backg.png"
 
     # 3. Create executable wrappers in /usr/bin
