@@ -18,8 +18,7 @@ from PySide6.QtGui import QPixmap, QIcon, QPalette, QColor, QFont, QPainter, QBr
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_LOGO_PATH = os.path.join(ASSET_DIR, "logo.png")
 BG_PATH = os.path.join(ASSET_DIR, "/usr/share/pixmaps/backg.png")
-# Using absolute path for backend script as requested
-BACKEND_SCRIPT = "/usr/share/chimera/chimera.py"
+BACKEND_SCRIPT = "/usr/share/chimera/chimera.py" 
 ZONEINFO_PATH = "/usr/share/zoneinfo"
 
 # --- Utility Functions ---
@@ -50,7 +49,6 @@ class StepItem(QListWidgetItem):
         self.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         font = QFont()
         font.setPointSize(11)
-        # font.setBold(True) # Optional: remove bold to fit system theme better
         self.setFont(font)
 
 class DebugDialog(QDialog):
@@ -58,18 +56,18 @@ class DebugDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Installer Settings (Debug)")
         self.resize(600, 400)
-
+        
         layout = QVBoxLayout(self)
         self.chk_dry_run = QCheckBox("Enable Dry Run (Do not write to disk)")
         self.chk_dry_run.setChecked(dry_run)
         layout.addWidget(self.chk_dry_run)
-
+        
         layout.addWidget(QLabel("Generated Backend Command:"))
         self.txt_cmd = QTextEdit()
         self.txt_cmd.setPlainText(command)
         self.txt_cmd.setReadOnly(True)
         layout.addWidget(self.txt_cmd)
-
+        
         btn_close = QPushButton("Apply & Close")
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close)
@@ -138,9 +136,8 @@ class InstallerWindow(QMainWindow):
         # --- Sidebar ---
         self.sidebar = QFrame()
         self.sidebar.setFixedWidth(240)
-        # Add a subtle frame shape if desired, or leave plain
         self.sidebar.setFrameShape(QFrame.StyledPanel)
-
+        
         side_layout = QVBoxLayout(self.sidebar)
         side_layout.setContentsMargins(0, 0, 0, 15)
         side_layout.setSpacing(10)
@@ -160,7 +157,6 @@ class InstallerWindow(QMainWindow):
             lbl_logo.setPixmap(pix)
         else:
             lbl_logo.setText("CHIMERA")
-            # Minimal styling just for the fallback text to be visible
             font = QFont()
             font.setBold(True)
             font.setPointSize(16)
@@ -194,11 +190,10 @@ class InstallerWindow(QMainWindow):
         content_layout.setContentsMargins(40, 40, 40, 40)
 
         self.lbl_header = QLabel(f"Welcome to {self.distro_name}")
-        header_font = QFont() # Use system font
+        header_font = QFont()
         header_font.setPointSize(20)
         header_font.setBold(True)
         self.lbl_header.setFont(header_font)
-        # Removed color stylesheet
         content_layout.addWidget(self.lbl_header)
 
         self.pages = QStackedWidget()
@@ -231,7 +226,6 @@ class InstallerWindow(QMainWindow):
             lbl_hero.setPixmap(pix)
         else:
             lbl_hero.setText(f"{self.distro_name}\nInstaller")
-            # Minimal frame for fallback
             lbl_hero.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
             lbl_hero.setFixedSize(700, 350)
 
@@ -239,9 +233,8 @@ class InstallerWindow(QMainWindow):
         lbl_text = QLabel(welcome_str)
         lbl_text.setAlignment(Qt.AlignCenter)
         lbl_text.setWordWrap(True)
-        # Minimal margin
         lbl_text.setContentsMargins(0, 20, 0, 0)
-
+        
         vbox.addStretch()
         vbox.addWidget(lbl_hero)
         vbox.addWidget(lbl_text)
@@ -384,11 +377,10 @@ class InstallerWindow(QMainWindow):
         self.pbar = QProgressBar()
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
-        # Use a generic monospace font family
         font_mono = QFont("Monospace")
         font_mono.setStyleHint(QFont.Monospace)
         self.txt_log.setFont(font_mono)
-
+        
         vbox.addStretch()
         vbox.addWidget(self.lbl_progress)
         vbox.addWidget(self.pbar)
@@ -560,8 +552,7 @@ class InstallerWindow(QMainWindow):
         cmd.extend(["--target", self.target_os])
 
         # Online/Offline Argument
-        if d.get("install_type") == "offline":
-            cmd.append("--offline")
+        # FIX: Remove --offline flag, simply omit --online for offline mode
         if d.get("install_type") == "online":
             cmd.append("--online")
 
@@ -574,7 +565,7 @@ class InstallerWindow(QMainWindow):
         # Page 1: Install Type
         if self.rad_offline.isChecked(): self.install_data['install_type'] = "offline"
         else: self.install_data['install_type'] = "online"
-
+        
         # Page 2: Location
         if self.cmb_city.currentData():
              self.install_data['tz'] = self.cmb_city.currentData()
@@ -689,14 +680,11 @@ class InstallerWindow(QMainWindow):
 
         if idx == 6:
             self.btn_next.setText("Install Now")
-            # Removed custom coloring for Install button
         else:
             self.btn_next.setText("Next")
-            # Removed custom coloring for Next button
 
     def generate_summary(self):
         d = self.install_data
-        # Removed hardcoded colors from summary HTML
         html = f"""
         <h3>System Configuration</h3>
         <b>Distro:</b> {self.distro_name}<br><b>Hostname:</b> {d['host']}<br>
@@ -753,8 +741,6 @@ class InstallerWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    # Removing force style to respect system settings (Fusion, Breeze, etc.)
-    # app.setStyle("Fusion")
     win = InstallerWindow()
     win.show()
     sys.exit(app.exec())
