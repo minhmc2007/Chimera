@@ -245,13 +245,13 @@ class ChimeraInstaller:
         log("Running pacstrap...", "info")
         pkgs = ["base", "linux", "linux-firmware", "base-devel", "nano", "networkmanager", "grub", "efibootmgr", "sudo"]
         if self.args.profile == "desktop": pkgs.extend(["plasma-meta", "konsole", "dolphin", "sddm"])
-        run_cmd(["pacstrap", "-K", MOUNT_POINT] + pkgs)
+        run_cmd(["pacstrap", "-K", MOUNT_POINT] + pkgs, stream=True)
         with open(f"{MOUNT_POINT}/etc/fstab", "w") as f:
             subprocess.run(["genfstab", "-U", MOUNT_POINT], stdout=f)
 
     def _install_debian_debootstrap(self):
         log(f"Running debootstrap ({DEBIAN_RELEASE})...", "info")
-        run_cmd(["debootstrap", "--arch", "amd64", DEBIAN_RELEASE, MOUNT_POINT, "http://deb.debian.org/debian"])
+        run_cmd(["debootstrap", "--arch", "amd64", DEBIAN_RELEASE, MOUNT_POINT, "http://deb.debian.org/debian"], stream=True)
         self._gen_fstab()
         with open(f"{MOUNT_POINT}/etc/apt/sources.list", "w") as f:
             f.write(f"deb http://deb.debian.org/debian {DEBIAN_RELEASE} main contrib non-free-firmware\n")
@@ -343,7 +343,7 @@ class ChimeraInstaller:
                     os.remove(f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf")
 
                 log("Rebuilding initramfs...", "info")
-                run_cmd("mkinitcpio -P", chroot=True)
+                run_cmd("mkinitcpio -P", chroot=True, stream=True)
 
             if self.target_os == "bal":
                 log("Applying Blue Archive Linux (BAL) specifics...", "info")
@@ -355,7 +355,7 @@ class ChimeraInstaller:
             if not shutil.which("arch-chroot"): self.setup_chroot_mounts()
             env = {"DEBIAN_FRONTEND": "noninteractive"}
             run_cmd("apt-get update", chroot=True, env=env)
-            run_cmd("apt-get install -y linux-image-amd64 linux-headers-amd64 locales grub-efi-amd64 network-manager sudo", chroot=True, env=env)
+            run_cmd("apt-get install -y linux-image-amd64 linux-headers-amd64 locales grub-efi-amd64 network-manager sudo", chroot=True, env=env, stream=True)
             run_cmd("echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen", chroot=True)
             run_cmd("locale-gen", chroot=True)
 
@@ -379,12 +379,9 @@ class ChimeraInstaller:
                 run_cmd(f"echo '{user}:{pwd}' | chpasswd", chroot=True)
 
             log("Configuring sudo access...", "info")
-            sudo_content = f"{user} ALL=(ALL:ALL) ALL\n"
-            sudo_file = f"{MOUNT_POINT}/etc/sudoers.d/{user}"
-            os.makedirs(f"{MOUNT_POINT}/etc/sudoers.d", exist_ok=True)
-            with open(sudo_file, "w") as f: f.write(sudo_content)
-            os.chmod(sudo_file, 0o440)
-            log(f"User '{user}' added to sudoers.", "success")
+            run_cmd("sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers", chroot=True, ignore_error=True)
+            log(f"User '{user}' added to wheel group with sudo access.", "success")
+
 
     def install_bal_extras(self):
         if self.target_os == "bal" and self.args.online:
@@ -392,10 +389,18 @@ class ChimeraInstaller:
                 log("Skipping BAL Online Extras: No user provided.", "warn")
                 return
 
+            log("BAL Online Mode: Initializing Keyring...", "HEADER")
+            
+            # --- FIX: Re-initialize keyring to prevent 'not writable'/'public key not found' errors ---
+            log("Running pacman-key --init and --populate...", "info")
+            # We must ignore errors here in case it's already done, but usually it's needed after rsync
+            run_cmd("pacman-key --init", chroot=True)
+            run_cmd("pacman-key --populate", chroot=True)
+            # ------------------------------------------------------------------------------------------
+
             log("BAL Online Mode: Installing Yay...", "HEADER")
-            log("Updating system (root)...", "info")
-            run_cmd("pacman -Syu --noconfirm", chroot=True, stream=True)
-            run_cmd("pacman -S --needed --noconfirm git base-devel", chroot=True, stream=True)
+            log("Syncing, updating, and installing build tools (git, base-devel)...", "info")
+            run_cmd("pacman -Syu --needed --noconfirm git base-devel", chroot=True, stream=True)
 
             user = self.args.user
             log(f"Building Yay (as user {user})...", "info")
@@ -426,12 +431,11 @@ class ChimeraInstaller:
     def install_bootloader(self):
         log("Installing Bootloader...", "info")
         
-        # --- NEW: Configure /etc/default/grub ---
+        # Configure /etc/default/grub
         grub_path = f"{MOUNT_POINT}/etc/default/grub"
         if os.path.exists(grub_path):
             log("Configuring /etc/default/grub...", "info")
             
-            # 1. Get Pretty Name
             pretty_name = self.target_os.capitalize()
             os_release = f"{MOUNT_POINT}/etc/os-release"
             if os.path.exists(os_release):
@@ -443,16 +447,12 @@ class ChimeraInstaller:
                                 break
                 except Exception: pass
             
-            # 2. Edit File
             try:
                 with open(grub_path, 'r') as f: lines = f.readlines()
                 with open(grub_path, 'w') as f:
                     for line in lines:
-                        # Set GRUB_DISTRIBUTOR to Pretty Name
                         if line.strip().startswith("GRUB_DISTRIBUTOR="):
                             f.write(f"GRUB_DISTRIBUTOR='{pretty_name}'\n")
-                        
-                        # Remove 'quiet' (Arch/BAL only)
                         elif self.target_os in ["arch", "bal"] and line.strip().startswith("GRUB_CMDLINE_LINUX_DEFAULT="):
                             new_line = line.replace("quiet", "").replace("  ", " ")
                             f.write(new_line)
@@ -460,7 +460,6 @@ class ChimeraInstaller:
                             f.write(line)
             except Exception as e:
                 log(f"Failed to edit grub config: {e}", "warn")
-        # ----------------------------------------
 
         target = "x86_64-efi" if self.uefi else "i386-pc"
         boot_id = self.target_os 
