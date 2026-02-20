@@ -391,22 +391,11 @@ class ChimeraInstaller:
 
             log("BAL Online Mode: Initializing Keyring...", "HEADER")
             
-            # --- FIX: Re-initialize keyring to prevent 'not writable'/'public key not found' errors ---
-            log("Running pacman-key --init and --populate...", "info")
-            # We must ignore errors here in case it's already done, but usually it's needed after rsync
+            # Initialize keyring to ensure pacman works correctly
             run_cmd("pacman-key --init", chroot=True)
             run_cmd("pacman-key --populate", chroot=True)
-            # ------------------------------------------------------------------------------------------
-
-            log("BAL Online Mode: Installing Yay...", "HEADER")
-            log("Syncing, updating, and installing build tools (git, base-devel)...", "info")
-            run_cmd("pacman -Syu --needed --noconfirm git base-devel", chroot=True, stream=True)
-
-            user = self.args.user
-            log(f"Building Yay (as user {user})...", "info")
-            build_cmd = f"git clone https://aur.archlinux.org/yay-bin.git /home/{user}/yay-bin && cd /home/{user}/yay-bin && makepkg -si --noconfirm"
-            full_cmd = f"su - {user} -c '{build_cmd}'"
-            run_cmd(full_cmd, chroot=True, stream=True)
+            
+            # Note: Yay installation removed as requested due to root/sudo issues
 
     def run_custom_scripts(self):
         if not self.args.run: return
