@@ -350,6 +350,7 @@ class ChimeraInstaller:
                 run_cmd("systemctl enable sddm", chroot=True, ignore_error=True)
                 log("Running /root/SilentSDDM/install.sh...", "info")
                 run_cmd("bash /root/SilentSDDM/install.sh", chroot=True, stream=True)
+                run_cmd("touch /etc/bal-installed", chroot=True, igrone_error=True)
 
         elif self.target_os == "debian":
             if not shutil.which("arch-chroot"): self.setup_chroot_mounts()
