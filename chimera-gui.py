@@ -613,7 +613,10 @@ class InstallerWindow(QMainWindow):
 
         # Page 2: Location
         if idx == 2:
-            self.install_data['tz'] = self.cmb_city.currentData()
+            tz = self.cmb_city.currentData()
+            if not tz:
+                return QMessageBox.warning(self, "Error", "Please select a timezone.")
+            self.install_data['tz'] = tz
 
         # Page 3: Disk Setup
         if idx == 3:

@@ -247,7 +247,7 @@ class ChimeraInstaller:
         if self.args.profile == "desktop": pkgs.extend(["plasma-meta", "konsole", "dolphin", "sddm"])
         run_cmd(["pacstrap", "-K", MOUNT_POINT] + pkgs, stream=True)
         with open(f"{MOUNT_POINT}/etc/fstab", "w") as f:
-            subprocess.run(["genfstab", "-U", MOUNT_POINT], stdout=f)
+            subprocess.run(["genfstab", "-U", MOUNT_POINT], stdout=f, check=True)
 
     def _install_debian_debootstrap(self):
         log(f"Running debootstrap ({DEBIAN_RELEASE})...", "info")

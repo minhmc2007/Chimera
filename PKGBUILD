@@ -59,7 +59,7 @@ EOF
 Name=Chimera System Installer
 Comment=Install the operating system to disk
 Exec=/usr/bin/chimera-gui
-Icon=/usr/share/chimera/logo.png
+Icon=/usr/share/pixmaps/logo.png
 Terminal=false
 Type=Application
 Categories=System;Settings;
