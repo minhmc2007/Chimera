@@ -27,7 +27,7 @@ def log(msg, level="info"):
     elif level == "warn": icon, color = "[?]", COLORS['WARN']
     elif level == "HEADER": icon, color = "[#]", COLORS['HEADER']
     elif level == "DEBUG": icon, color = "[D]", COLORS['WARN']
-
+    
     print(f"{color}{icon} {msg}{COLORS['ENDC']}", flush=True)
 
 def set_progress(percent, status_msg):
@@ -78,18 +78,18 @@ class ChimeraInstaller:
                 cmd_str = " ".join(shlex.quote(arg) for arg in cmd)
             else:
                 cmd_str = cmd
-
+            
             if shutil.which("arch-chroot"):
                 cmd = ["arch-chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
             else:
                 cmd = ["chroot", MOUNT_POINT, "/bin/sh", "-c", cmd_str]
             shell = False
-
+        
         if self.debug:
             log(f"CMD: {cmd}", "DEBUG")
 
         kwargs = {'shell': shell, 'env': env}
-
+        
         if input_data is not None:
             kwargs['input'] = input_data.encode('utf-8')
         else:
@@ -100,7 +100,7 @@ class ChimeraInstaller:
             kwargs['stderr'] = subprocess.PIPE
 
         proc = subprocess.run(cmd, **kwargs)
-
+        
         if proc.returncode != 0:
             if check:
                 log(f"Command Failed: {cmd}", "error")
@@ -119,11 +119,11 @@ class ChimeraInstaller:
 
     def tools_check(self):
         tools = ["parted", "wipefs", "mkfs.ext4", "rsync", "lsblk", "mount", "umount", "findmnt", "partprobe", "udevadm"]
-        if self.uefi:
+        if self.uefi: 
             tools.append("mkfs.vfat")
         if self.args.swap:
             tools.extend(["mkswap", "swapon", "swapoff"])
-
+            
         missing = [t for t in tools if not shutil.which(t)]
         if missing:
             sys.exit(f"{COLORS['FAIL']}Error: Missing required tools: {', '.join(missing)}{COLORS['ENDC']}")
@@ -166,10 +166,10 @@ class ChimeraInstaller:
     def partition_handler(self):
         set_progress(20, "Partitioning Disk...")
         log("Preparing Partitions...", "info")
-
+        
         if os.path.exists(MOUNT_POINT) and os.path.ismount(MOUNT_POINT):
             self.run_cmd(["umount", "-R", MOUNT_POINT], check=False)
-
+        
         if self.args.disk_mode == "auto":
             try:
                 swaps = subprocess.check_output(["lsblk", "-nlo", "NAME,FSTYPE", self.args.disk], stderr=subprocess.DEVNULL).decode().splitlines()
@@ -189,14 +189,14 @@ class ChimeraInstaller:
         self.run_cmd(["mkfs.ext4", "-F", self.args.rootfs])
         os.makedirs(MOUNT_POINT, exist_ok=True)
         self.run_cmd(["mount", self.args.rootfs, MOUNT_POINT])
-
+        
         if self.args.boot:
             path = f"{MOUNT_POINT}/boot/efi" if self.uefi else f"{MOUNT_POINT}/boot"
             os.makedirs(path, exist_ok=True)
             if self.uefi: self.run_cmd(["mkfs.vfat", "-F32", self.args.boot])
             else: self.run_cmd(["mkfs.ext4", "-F", self.args.boot])
             self.run_cmd(["mount", self.args.boot, path])
-
+        
         if self.args.swap:
             self.run_cmd(["mkswap", self.args.swap])
 
@@ -205,11 +205,11 @@ class ChimeraInstaller:
         label_type = "gpt" if self.uefi else "msdos"
         self.run_cmd(["wipefs", "--all", self.disk])
         self.run_cmd(["parted", "-s", self.disk, "mklabel", label_type])
-
+        
         boot_part_end = "513MiB"
         self.run_cmd(["parted", "-s", self.disk, "mkpart", "primary", "1MiB", boot_part_end])
         current_end = boot_part_end
-
+        
         if self.args.swap:
             size = self.args.swap.upper()
             mult = 1024 if "G" in size else 1
@@ -219,9 +219,9 @@ class ChimeraInstaller:
             current_end = swap_end
 
         self.run_cmd(["parted", "-s", self.disk, "mkpart", "primary", current_end, "100%"])
-
+        
         prefix = f"{self.disk}p" if any(self.disk.startswith(p) for p in ["/dev/nvme", "/dev/mmc", "/dev/loop"]) else self.disk
-
+        
         self.args.boot = f"{prefix}1"
         if self.args.swap:
             self.args.swap = f"{prefix}2"
@@ -231,7 +231,7 @@ class ChimeraInstaller:
 
         if self.uefi: self.run_cmd(["parted", "-s", self.disk, "set", "1", "esp", "on"])
         else: self.run_cmd(["parted", "-s", self.disk, "set", "1", "boot", "on"])
-
+        
         self.run_cmd(["partprobe", self.disk])
         self.run_cmd(["udevadm", "settle"])
 
@@ -239,11 +239,11 @@ class ChimeraInstaller:
         set_progress(50, "Installing Base System...")
         log(f"Copying Base System (Preserving custom distro files)...", "info")
         excludes = [
-            "--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*",
-            "--exclude=/run/*", "--exclude=/tmp/*", "--exclude=/mnt/*",
+            "--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*", 
+            "--exclude=/run/*", "--exclude=/tmp/*", "--exclude=/mnt/*", 
             f"--exclude={MOUNT_POINT}/*"
         ]
-
+        
         if self.args.online:
             excludes.append("--exclude=/var/cache/pacman/pkg/*")
 
@@ -260,7 +260,7 @@ class ChimeraInstaller:
             os.makedirs(target, exist_ok=True)
             self.run_cmd(["mount", "--rbind", f"/{m}", target], check=False)
             self.run_cmd(["mount", "--make-rslave", target], check=False)
-
+        
         resolv_path = f"{MOUNT_POINT}/etc/resolv.conf"
         if os.path.lexists(resolv_path):
             os.remove(resolv_path)
@@ -270,10 +270,10 @@ class ChimeraInstaller:
     def configure_system(self):
         set_progress(75, "Configuring System...")
         log("Configuring System Locale & Time...", "info")
-
+        
         with open(f"{MOUNT_POINT}/etc/hostname", "w") as f:
             f.write(f"{self.args.hostname}\n")
-
+        
         if self.args.timezone:
             tz_path = os.path.abspath(f"/usr/share/zoneinfo/{self.args.timezone}")
             if os.path.exists(f"{MOUNT_POINT}{tz_path}"):
@@ -296,12 +296,12 @@ class ChimeraInstaller:
             if not found_locale:
                 with open(locale_file, "a") as f:
                     f.write(f"{locale_str}\n")
-
+        
         self.run_cmd(["locale-gen"], chroot=True, check=False)
-
+        
         with open(f"{MOUNT_POINT}/etc/locale.conf", "w") as f:
             f.write(f"LANG={self.args.locale_lang}\n")
-
+            
         with open(f"{MOUNT_POINT}/etc/vconsole.conf", "w") as f:
             f.write(f"KEYMAP={self.args.keyboard}\nFONT={self.args.console_font}\n")
 
@@ -311,32 +311,36 @@ class ChimeraInstaller:
 
         self.run_cmd(["systemctl", "enable", "NetworkManager"], chroot=True, check=False)
 
-        # Packages Setup
+        # Build list of packages to install
         pkgs = []
         if self.args.kernel and self.args.kernel != "linux":
             pkgs.extend([self.args.kernel, f"{self.args.kernel}-headers"])
         if self.args.zram: pkgs.append("zram-generator")
-
-        if self.args.audio == "pipewire":
-            # [FIX] Force removal of conflicting jack2 before pipewire-jack installation
-            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack2"], chroot=True, check=False)
+        
+        if self.args.audio == "pipewire": 
             pkgs.extend(["pipewire", "pipewire-pulse", "pipewire-alsa", "pipewire-jack", "wireplumber"])
-        elif self.args.audio == "pulseaudio":
+        elif self.args.audio == "pulseaudio": 
             pkgs.extend(["pulseaudio", "pulseaudio-alsa"])
-
+            
         if self.args.bluetooth: pkgs.extend(["bluez", "bluez-utils"])
 
+        # Online mode: Update system FIRST
         if self.args.online:
             log("Online Mode: Initializing keyring and upgrading system...", "info")
             self.run_cmd(["pacman-key", "--init"], chroot=True, check=False)
             self.run_cmd(["pacman-key", "--populate"], chroot=True, check=False)
             self.run_cmd(["pacman", "-Syuu", "--noconfirm"], chroot=True)
 
-            if pkgs:
+        # [FIX] Run the removal of conflicting packages AFTER -Syuu so they don't get reinstalled by dependencies!
+        if self.args.audio == "pipewire":
+            log("Removing legacy jack packages to prevent Pipewire conflicts...", "info")
+            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack", "jack2"], chroot=True, check=False)
+            
+        if pkgs:
+            if self.args.online:
                 self.run_cmd(["pacman", "-S", "--noconfirm", "--needed"] + pkgs, chroot=True)
-        else:
-            log("Offline Mode: Installing packages from local cache...", "info")
-            if pkgs:
+            else:
+                log("Offline Mode: Installing packages from local cache...", "info")
                 self.run_cmd(["pacman", "-S", "--noconfirm", "--needed"] + pkgs, chroot=True, check=False)
 
         # Services
@@ -345,7 +349,7 @@ class ChimeraInstaller:
             with open(zram_conf, "w") as f:
                 f.write(f"[zram0]\ncompression-algorithm = {self.args.zram_comp}\nswap-priority = 100\nfs-type = swap\n")
             self.run_cmd(["systemctl", "daemon-reload"], chroot=True, check=False)
-
+                
         if self.args.bluetooth:
             self.run_cmd(["systemctl", "enable", "bluetooth"], chroot=True, check=False)
 
@@ -354,14 +358,14 @@ class ChimeraInstaller:
             log("Setting up Blue Archive Linux (BAL) specifics...", "info")
             sddm_script = "/root/SilentSDDM/install.sh"
             chroot_sddm_script = f"{MOUNT_POINT}{sddm_script}"
-
+            
             if os.path.exists(chroot_sddm_script):
                 log("Running SilentSDDM installer script...", "info")
                 os.chmod(chroot_sddm_script, 0o755)
                 self.run_cmd([sddm_script], chroot=True, check=False)
             else:
                 log(f"Notice: {sddm_script} not found on target filesystem.", "warn")
-
+            
             log("Enabling SDDM display manager...", "info")
             self.run_cmd(["systemctl", "enable", "sddm"], chroot=True, check=False)
 
@@ -393,12 +397,12 @@ class ChimeraInstaller:
                         f.write(line.replace("quiet", "").replace("  ", " "))
                     else:
                         f.write(line)
-
+        
         bootloader_id = "BlueArchiveLinux" if self.target_os == "bal" else self.args.target.capitalize()
         cmd = ["grub-install", f"--target={'x86_64-efi' if self.uefi else 'i386-pc'}", f"--bootloader-id={bootloader_id}", "--recheck"]
         if self.uefi: cmd.append("--efi-directory=/boot/efi")
         else: cmd.append(self.disk)
-
+        
         self.run_cmd(cmd, chroot=True)
         self.run_cmd(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"], chroot=True)
 
@@ -412,13 +416,13 @@ def main():
     parser.add_argument("--boot", help="Manual: Boot partition")
     parser.add_argument("--rootfs", help="Manual: Root partition")
     parser.add_argument("--swap", help="Swap partition or size")
-
+    
     parser.add_argument("--keyboard", default="us")
     parser.add_argument("--locale-lang", default="en_US.UTF-8")
     parser.add_argument("--locale-enc", default="UTF-8")
     parser.add_argument("--console-font", default="default8x16")
     parser.add_argument("--mirror-region", default="Worldwide")
-
+    
     parser.add_argument("--kernel", default="linux")
     parser.add_argument("--zram", action="store_true")
     parser.add_argument("--zram-comp", default="lz4")
@@ -426,14 +430,14 @@ def main():
     parser.add_argument("--bluetooth", action="store_true")
     parser.add_argument("--timezone", default="UTC")
     parser.add_argument("--hostname", default=socket.gethostname())
-
+    
     parser.add_argument("--user", help="Username to create")
     parser.add_argument("--target", choices=["arch", "bal"], default="arch")
     parser.add_argument("--online", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--i-am-very-stupid", action="store_true")
-
+    
     args = parser.parse_args()
     if os.geteuid() != 0: sys.exit("Run as root.")
 
