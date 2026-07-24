@@ -321,7 +321,6 @@ def build_html(distro_name, logo_uri, hostname):
     </div>
 
     <script>
-        // Data injected from Python
         const TIMEZONES = {tz_json};
         const KEYMAPS = {km_json};
         const LOCALES = {lc_json};
@@ -353,7 +352,6 @@ def build_html(distro_name, logo_uri, hostname):
             populateSelect('sel-timezone', TIMEZONES, 'UTC');
             populateSelect('sel-region', REGIONS, 'Worldwide');
 
-            // Hide manual disk options initially
             document.getElementById('disk-manual').style.display = 'none';
         }};
 
@@ -386,7 +384,6 @@ def build_html(distro_name, logo_uri, hostname):
         }}
 
         function renderDisks(disks, partitions) {{
-            // Render Disks for Auto Mode
             const container = document.getElementById('disk-auto');
             container.innerHTML = '';
 
@@ -408,7 +405,6 @@ def build_html(distro_name, logo_uri, hostname):
                 }});
             }}
 
-            // Render Partitions for Manual Mode
             ['sel-rootfs', 'sel-boot', 'sel-swap'].forEach(id => {{
                 const el = document.getElementById(id);
                 el.innerHTML = '';
@@ -536,7 +532,6 @@ class BackendBridge(QObject):
         disks = []
         partitions = []
 
-        # Load Disks
         try:
             out = subprocess.check_output(["lsblk", "-d", "-n", "-o", "NAME,SIZE,MODEL,TYPE", "-J"]).decode()
             for d in json.loads(out).get('blockdevices', []):
@@ -546,7 +541,6 @@ class BackendBridge(QObject):
         except Exception as e:
             disks.append({"name": f"Error loading disks: {e}", "path": ""})
 
-        # Load Partitions
         try:
             out = subprocess.check_output(["lsblk", "-l", "-n", "-o", "NAME,PATH,SIZE,TYPE,FSTYPE", "-J"]).decode()
             for p in json.loads(out).get('blockdevices', []):
@@ -610,7 +604,8 @@ class BackendBridge(QObject):
             self.update_progress(100, "Dry Run Complete")
             return
 
-        self.process = QProcess()
+        # Parent QProcess to self so PySide lifecycle handles it safely
+        self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.MergedChannels)
 
         qenv = QProcessEnvironment.systemEnvironment()
@@ -632,8 +627,9 @@ class BackendBridge(QObject):
         elif "configuring system" in lower: self.update_progress(75, "Configuring System...")
         elif "bootloader" in lower: self.update_progress(90, "Installing Bootloader...")
 
-    def install_finished(self):
-        if self.process.exitCode() == 0:
+    @Slot(int, QProcess.ExitStatus)
+    def install_finished(self, exit_code, exit_status):
+        if exit_code == 0 and exit_status == QProcess.NormalExit:
             self.update_progress(100, "Installation Successful!")
         else:
             self.update_progress(0, "Installation Failed")
