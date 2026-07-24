@@ -1,60 +1,59 @@
 # Maintainer: minhmc2007 <quangminh21072010@gmail.com>
 pkgname=chimera-installer
-pkgver=1.0.2
+pkgver=1.0.3
 pkgrel=1
 pkgdesc="A custom Linux installer written in Python and PySide6"
 arch=('any')
-url="https://github.com/minhmc2007/Chimera" 
-license=('MIT') 
+url="https://github.com/minhmc2007/Chimera"
+license=('MIT')
 depends=('python' 'pyside6')
 makedepends=()
 
 # If you are building this locally inside the Chimera folder, you can just use local sources:
 source=("local://chimera.py"
-        "local://chimera-gui.py"
-        "local://logo.png"
-        "local://backg.png"
-        "local://README.md"
-        "local://LICENSE")
+  "local://chimera-gui.py"
+  "local://logo.png"
+  "local://backg.png"
+  "local://README.md"
+  "local://LICENSE")
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
-
 package() {
-    # 1. Create necessary system directories
-    install -dm755 "$pkgdir/usr/share/chimera"
-    install -dm755 "$pkgdir/usr/bin"
-    install -dm755 "$pkgdir/usr/share/applications"
-    install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
-    install -dm755 "$pkgdir/usr/share/doc/$pkgname"
-    install -dm755 "$pkgdir/usr/share/pixmaps"
+  # 1. Create necessary system directories
+  install -dm755 "$pkgdir/usr/share/chimera"
+  install -dm755 "$pkgdir/usr/bin"
+  install -dm755 "$pkgdir/usr/share/applications"
+  install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
+  install -dm755 "$pkgdir/usr/share/doc/$pkgname"
+  install -dm755 "$pkgdir/usr/share/pixmaps"
 
-    # 2. Install application files to /usr/share/chimera
-    install -m755 "$srcdir/chimera.py" "$pkgdir/usr/share/chimera/chimera.py"
-    install -m755 "$srcdir/chimera-gui.py" "$pkgdir/usr/share/chimera/chimera-gui.py"
-    install -m644 "$srcdir/logo.png" "$pkgdir/usr/share/pixmaps/logo.png"
-    install -m644 "$srcdir/backg.png" "$pkgdir/usr/share/pixmaps/backg.png"
+  # 2. Install application files to /usr/share/chimera
+  install -m755 "$srcdir/chimera.py" "$pkgdir/usr/share/chimera/chimera.py"
+  install -m755 "$srcdir/chimera-gui.py" "$pkgdir/usr/share/chimera/chimera-gui.py"
+  install -m644 "$srcdir/logo.png" "$pkgdir/usr/share/pixmaps/logo.png"
+  install -m644 "$srcdir/backg.png" "$pkgdir/usr/share/pixmaps/backg.png"
 
-    # 3. Create executable wrappers in /usr/bin
-    # This ensures the Python script's working directory has access to the image files.
-    
-    # CLI wrapper
-    cat <<EOF > "$pkgdir/usr/bin/chimera"
+  # 3. Create executable wrappers in /usr/bin
+  # This ensures the Python script's working directory has access to the image files.
+
+  # CLI wrapper
+  cat <<EOF >"$pkgdir/usr/bin/chimera"
 #!/bin/sh
 cd /usr/share/chimera
 exec python3 chimera.py "\$@"
 EOF
-    chmod +x "$pkgdir/usr/bin/chimera"
+  chmod +x "$pkgdir/usr/bin/chimera"
 
-    # GUI wrapper
-    cat <<EOF > "$pkgdir/usr/bin/chimera-gui"
+  # GUI wrapper
+  cat <<EOF >"$pkgdir/usr/bin/chimera-gui"
 #!/bin/sh
 cd /usr/share/chimera
 exec python3 chimera-gui.py "\$@"
 EOF
-    chmod +x "$pkgdir/usr/bin/chimera-gui"
+  chmod +x "$pkgdir/usr/bin/chimera-gui"
 
-    # 4. Create Desktop Entry for GUI
-    cat <<EOF > "$pkgdir/usr/share/applications/chimera-gui.desktop"
+  # 4. Create Desktop Entry for GUI
+  cat <<EOF >"$pkgdir/usr/share/applications/chimera-gui.desktop"
 [Desktop Entry]
 Name=Chimera System Installer
 Comment=Install the operating system to disk
@@ -65,7 +64,7 @@ Type=Application
 Categories=System;Settings;
 EOF
 
-    # 5. Install Documentation and License
-    install -m644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-    install -m644 "$srcdir/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  # 5. Install Documentation and License
+  install -m644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -m644 "$srcdir/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

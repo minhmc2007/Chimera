@@ -5,711 +5,375 @@ import subprocess
 import json
 import shutil
 import socket
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                               QHBoxLayout, QLabel, QStackedWidget, QPushButton,
-                               QRadioButton, QComboBox, QLineEdit, QCheckBox,
-                               QFrame, QListWidget, QListWidgetItem, QMessageBox,
-                               QTextEdit, QProgressBar, QSpinBox, QGroupBox,
-                               QDialog, QToolButton, QSizePolicy, QScrollArea, QAbstractItemView)
-from PySide6.QtCore import Qt, QSize, QProcess, QTimer, QSettings, QPoint
-from PySide6.QtGui import QPixmap, QIcon, QPalette, QColor, QFont, QPainter, QBrush, QTextCursor
+from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QDialog,
+                               QVBoxLayout, QCheckBox, QTextEdit, QPushButton, QLabel)
+from PySide6.QtCore import Qt, QProcess, QTimer, QObject, Slot, Signal
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWebChannel import QWebChannel
 
-# --- Configuration & Constants ---
+# --- Configuration ---
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
-LOCAL_LOGO_PATH = os.path.join(ASSET_DIR, "logo.png")
-BG_PATH = os.path.join(ASSET_DIR, "/usr/share/pixmaps/backg.png")
-BACKEND_SCRIPT = "/usr/share/chimera/chimera.py" 
+BACKEND_SCRIPT = "/usr/share/chimera/chimera.py"
 ZONEINFO_PATH = "/usr/share/zoneinfo"
+LOCAL_LOGO = os.path.join(ASSET_DIR, "logo.png")
 
-# --- Utility Functions ---
 def get_os_release():
-    """Parses /etc/os-release into a dictionary."""
-    info = {
-        "NAME": "Linux",
-        "PRETTY_NAME": "Linux Installer",
-        "ID": "arch",
-        "LOGO": "chimera"
-    }
+    info = {"NAME": "Linux", "PRETTY_NAME": "Linux Installer", "ID": "linux"}
     try:
-        os_release_path = "/etc/os_release" if not os.path.exists("/etc/os-release") else "/etc/os-release"
-        if os.path.exists(os_release_path):
-            with open(os_release_path) as f:
+        path = "/etc/os-release" if os.path.exists("/etc/os-release") else "/etc/os_release"
+        if os.path.exists(path):
+            with open(path) as f:
                 for line in f:
                     if "=" in line:
                         k, v = line.strip().split("=", 1)
                         info[k] = v.strip('"').strip("'")
-    except Exception as e:
-        print(f"Failed to read os-release: {e}")
+    except: pass
     return info
 
-# --- Custom Widgets ---
-class StepItem(QListWidgetItem):
-    def __init__(self, text):
-        super().__init__(text)
-        self.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        font = QFont()
-        font.setPointSize(11)
-        self.setFont(font)
+def load_logo_data_uri(logo_name=""):
+    import base64
+    paths = []
 
+    # Try looking for OS specific logos first
+    if logo_name:
+        paths.append(f"/usr/share/pixmaps/{logo_name}.png")
+        paths.append(f"/usr/share/pixmaps/{logo_name}.svg")
+        paths.append(f"/usr/share/icons/{logo_name}.png")
+        paths.append(f"/usr/share/icons/{logo_name}.svg")
+
+    # Fallbacks
+    paths.append(LOCAL_LOGO)
+    paths.append("/usr/share/pixmaps/chimera.png")
+
+    for path in paths:
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                data = base64.b64encode(f.read()).decode()
+                ext = os.path.splitext(path)[1][1:].lower()
+                mime = "image/svg+xml" if ext == "svg" else f"image/{ext}"
+                return f"data:{mime};base64,{data}"
+    return ""
+
+def build_html(distro_name, logo_uri, hostname):
+    logo_css = f"url('{logo_uri}') center/contain no-repeat" if logo_uri else "linear-gradient(135deg, var(--accent-1), var(--accent-2))"
+    logo_inner_display = "none" if logo_uri else "block"
+
+    return f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{distro_name} Installer</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <style>
+        :root {{
+            --bg-color: #000000;
+            --text-primary: rgba(255, 255, 255, 0.95);
+            --text-secondary: rgba(255, 255, 255, 0.6);
+            --accent-1: #2997ff;
+            --accent-2: #6e5cff;
+            --glass-bg: rgba(255, 255, 255, 0.06);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --spring-curve: cubic-bezier(0.34, 1.56, 0.64, 1);
+            --smooth-curve: cubic-bezier(0.22, 1, 0.36, 1);
+        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-font-smoothing: antialiased; }}
+        body {{ font-family: 'Inter', sans-serif; background: var(--bg-color); color: var(--text-primary); overflow: hidden; height: 100vh; width: 100vw; cursor: default; }}
+
+        #bg-canvas {{ position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 0; filter: blur(80px) saturate(150%); opacity: 0.4; }}
+        .blob {{ position: absolute; border-radius: 50%; mix-blend-mode: screen; animation: float 20s infinite ease-in-out; }}
+        .blob:nth-child(1) {{ width: 40vmax; height: 40vmax; background: var(--accent-1); top: -10vmax; left: -10vmax; }}
+        .blob:nth-child(2) {{ width: 35vmax; height: 35vmax; background: var(--accent-2); bottom: -10vmax; right: -10vmax; animation-delay: -5s; }}
+        .blob:nth-child(3) {{ width: 20vmax; height: 20vmax; background: #ff2d55; top: 40%; left: 50%; animation-delay: -10s; }}
+        @keyframes float {{ 0%, 100% {{ transform: translate(0, 0) scale(1); }} 33% {{ transform: translate(10vw, 10vh) scale(1.1); }} 66% {{ transform: translate(-10vw, 5vh) scale(0.9); }} }}
+
+        #installer {{ position: relative; z-index: 1; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }}
+        .screen {{ position: absolute; width: 100%; max-width: 600px; padding: 40px; display: flex; flex-direction: column; align-items: center; opacity: 0; pointer-events: none; transform: translateY(20px) scale(0.98); transition: opacity 0.6s var(--smooth-curve), transform 0.8s var(--spring-curve); }}
+        .screen.active {{ opacity: 1; pointer-events: auto; transform: translateY(0) scale(1); }}
+
+        #welcome-logo {{ width: 100px; height: 100px; background: {logo_css}; border-radius: 28px; margin-bottom: 40px; box-shadow: 0 10px 40px rgba(41, 151, 255, 0.3); animation: breathe 4s infinite ease-in-out; display: flex; justify-content: center; align-items: center; }}
+        @keyframes breathe {{ 0%, 100% {{ transform: scale(1); }} 50% {{ transform: scale(1.05); }} }}
+        .logo-inner {{ display: {logo_inner_display}; width: 40px; height: 40px; border: 4px solid white; border-radius: 50%; border-right-color: transparent; transform: rotate(45deg); }}
+
+        #welcome-text {{ font-size: 56px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 20px; text-align: center; transition: opacity 0.3s ease; }}
+        .subtitle {{ font-size: 18px; color: var(--text-secondary); font-weight: 400; margin-bottom: 60px; text-align: center; }}
+
+        .btn-primary {{ background: rgba(255, 255, 255, 0.1); backdrop-filter: blur(20px); border: 1px solid var(--glass-border); color: white; padding: 14px 40px; border-radius: 980px; font-size: 17px; font-weight: 500; cursor: pointer; transition: transform 0.2s var(--spring-curve), background 0.2s ease; }}
+        .btn-primary:hover {{ background: rgba(255, 255, 255, 0.15); transform: scale(1.03); }}
+        .btn-primary:active {{ transform: scale(0.98); }}
+
+        .card {{ background: var(--glass-bg); backdrop-filter: blur(40px) saturate(180%); border: 1px solid var(--glass-border); border-radius: 20px; width: 100%; padding: 8px; box-shadow: 0 20px 50px rgba(0,0,0,0.4); margin-bottom: 30px; }}
+        .list-item {{ display: flex; align-items: center; padding: 16px; border-radius: 12px; cursor: pointer; transition: background 0.15s ease; opacity: 0; transform: translateY(10px); }}
+        .screen.active .list-item {{ animation: cascadeIn 0.5s var(--spring-curve) forwards; }}
+        .screen.active .list-item:nth-child(1) {{ animation-delay: 0.1s; }}
+        .screen.active .list-item:nth-child(2) {{ animation-delay: 0.15s; }}
+        .screen.active .list-item:nth-child(3) {{ animation-delay: 0.2s; }}
+        .screen.active .list-item:nth-child(4) {{ animation-delay: 0.25s; }}
+        @keyframes cascadeIn {{ to {{ opacity: 1; transform: translateY(0); }} }}
+        .list-item:hover {{ background: rgba(255,255,255,0.08); }}
+        .item-name {{ font-size: 17px; flex-grow: 1; }}
+        .item-status {{ font-size: 14px; color: var(--accent-1); opacity: 0; transition: opacity 0.3s ease; }}
+        .list-item.selected .item-status {{ opacity: 1; }}
+
+        .form-group {{ width: 100%; margin-bottom: 20px; }}
+        .form-label {{ font-size: 14px; color: var(--text-secondary); margin-bottom: 8px; display: block; }}
+        .form-input {{ width: 100%; padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid var(--glass-border); color: white; font-size: 16px; outline: none; transition: background 0.2s; }}
+        .form-input:focus {{ background: rgba(255,255,255,0.1); border-color: var(--accent-1); }}
+
+        .progress-ring-container {{ position: relative; width: 180px; height: 180px; margin-bottom: 40px; }}
+        .progress-ring {{ transform: rotate(-90deg); width: 100%; height: 100%; }}
+        .ring-bg {{ stroke: rgba(255,255,255,0.1); stroke-width: 8; fill: transparent; }}
+        .ring-fill {{ stroke: url(#gradient); stroke-width: 8; fill: transparent; stroke-linecap: round; stroke-dasharray: 502; stroke-dashoffset: 502; transition: stroke-dashoffset 0.1s linear; filter: drop-shadow(0 0 10px var(--accent-1)); }}
+        .progress-text {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 48px; font-weight: 600; letter-spacing: -0.02em; }}
+        .status-text {{ font-size: 18px; color: var(--text-secondary); height: 24px; transition: opacity 0.3s ease; text-align: center; margin-bottom: 20px; }}
+
+        #terminal-log {{ width: 100%; height: 150px; background: rgba(0,0,0,0.6); border: 1px solid var(--glass-border); border-radius: 12px; padding: 15px; color: #0aff; font-family: monospace; font-size: 12px; overflow-y: auto; display: none; margin-top: 20px; }}
+        .btn-text {{ background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 14px; text-decoration: underline; margin-top: 10px; }}
+        .btn-text:hover {{ color: white; }}
+
+        #settings-btn {{ position: fixed; bottom: 20px; left: 20px; width: 40px; height: 40px; background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: 50%; display: flex; justify-content: center; align-items: center; cursor: pointer; z-index: 100; backdrop-filter: blur(20px); transition: transform 0.2s, background 0.2s; }}
+        #settings-btn:hover {{ background: rgba(255,255,255,0.15); transform: rotate(45deg); }}
+
+        .checkmark {{ width: 100px; height: 100px; border-radius: 50%; background: var(--accent-1); display: flex; justify-content: center; align-items: center; margin-bottom: 40px; animation: popIn 0.6s var(--spring-curve); box-shadow: 0 0 50px rgba(41, 151, 255, 0.5); }}
+        @keyframes popIn {{ 0% {{ transform: scale(0); opacity: 0; }} 100% {{ transform: scale(1); opacity: 1; }} }}
+        .checkmark svg {{ width: 50px; height: 50px; stroke: white; stroke-width: 3; fill: none; stroke-dasharray: 50; stroke-dashoffset: 50; animation: drawCheck 0.4s 0.3s ease forwards; }}
+        @keyframes drawCheck {{ to {{ stroke-dashoffset: 0; }} }}
+    </style>
+</head>
+<body>
+    <div id="bg-canvas"><div class="blob"></div><div class="blob"></div><div class="blob"></div></div>
+    <svg width="0" height="0"><defs><linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#2997ff" /><stop offset="100%" stop-color="#6e5cff" /></linearGradient></defs></svg>
+
+    <!-- Settings Gear (Bottom Left) -->
+    <div id="settings-btn" onclick="openSettings()">⚙</div>
+
+    <div id="installer">
+        <!-- Welcome -->
+        <section id="welcome-screen" class="screen active">
+            <div id="welcome-logo"><div class="logo-inner"></div></div>
+            <h1 id="welcome-text">Welcome</h1>
+            <p class="subtitle">Let's get your system set up.</p>
+            <button class="btn-primary" onclick="transitionTo('type-screen')">Continue</button>
+        </section>
+
+        <!-- Install Type -->
+        <section id="type-screen" class="screen">
+            <h2 style="font-size: 32px; margin-bottom: 30px; align-self: flex-start;">Installation Mode</h2>
+            <div class="card">
+                <div class="list-item selected" onclick="selectOption(this, 'online')">
+                    <span class="item-name">Online Install (Downloads latest packages)</span>
+                    <span class="item-status">Selected</span>
+                </div>
+                <div class="list-item" onclick="selectOption(this, 'offline')">
+                    <span class="item-name">Offline Install (Uses local packages)</span>
+                    <span class="item-status">Selected</span>
+                </div>
+            </div>
+            <button class="btn-primary" onclick="transitionTo('disk-screen')">Continue</button>
+        </section>
+
+        <!-- Disk Selection -->
+        <section id="disk-screen" class="screen">
+            <h2 style="font-size: 32px; margin-bottom: 30px; align-self: flex-start;">Choose Storage Drive</h2>
+            <div class="card" id="disk-list">
+                <!-- Disks injected by Python -->
+            </div>
+            <button class="btn-primary" onclick="transitionTo('user-screen')">Continue</button>
+        </section>
+
+        <!-- User Setup -->
+        <section id="user-screen" class="screen">
+            <h2 style="font-size: 32px; margin-bottom: 30px; align-self: flex-start;">Create User Account</h2>
+            <div class="form-group">
+                <label class="form-label">Computer Name (Hostname)</label>
+                <input type="text" class="form-input" id="inp-host" value="{hostname}">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Username</label>
+                <input type="text" class="form-input" id="inp-user">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Password (Root & User)</label>
+                <input type="password" class="form-input" id="inp-pass">
+            </div>
+            <button class="btn-primary" onclick="transitionTo('install-screen'); startInstall();">Install Now</button>
+        </section>
+
+        <!-- Installation -->
+        <section id="install-screen" class="screen">
+            <div class="progress-ring-container">
+                <svg class="progress-ring" viewBox="0 0 180 180"><circle class="ring-bg" cx="90" cy="90" r="80"></circle><circle class="ring-fill" cx="90" cy="90" r="80"></circle></svg>
+                <div class="progress-text" id="progress-percent">0%</div>
+            </div>
+            <div class="status-text" id="install-status">Preparing installation...</div>
+            <button class="btn-text" onclick="toggleLog()">Show Details</button>
+            <div id="terminal-log"></div>
+        </section>
+
+        <!-- Complete -->
+        <section id="complete-screen" class="screen">
+            <div class="checkmark"><svg viewBox="0 0 50 50"><path d="M14 27l5 5 16-16" /></svg></div>
+            <h1 style="font-size: 40px; font-weight: 700; margin-bottom: 20px;">All Set.</h1>
+            <p class="subtitle" style="margin-bottom: 40px;">{distro_name} has been successfully installed.</p>
+            <button class="btn-primary" onclick="mockRestart()">Restart</button>
+        </section>
+    </div>
+
+    <script>
+        let selectedInstallType = 'online';
+        let selectedDisk = null;
+        let pyBackend = null;
+
+        new QWebChannel(qt.webChannelTransport, function(channel) {{
+            pyBackend = channel.objects.backend;
+            pyBackend.loadDisks();
+        }});
+
+        function transitionTo(screenId) {{
+            const currentScreen = document.querySelector('.screen.active');
+            const nextScreen = document.getElementById(screenId);
+            currentScreen.style.opacity = '0';
+            currentScreen.style.transform = 'scale(0.95)';
+            setTimeout(() => {{
+                currentScreen.classList.remove('active');
+                nextScreen.classList.add('active');
+            }}, 400);
+        }}
+
+        const welcomeText = document.getElementById('welcome-text');
+        const languages = ['Welcome', 'Bienvenue', 'Willkommen', '欢迎', 'ようこそ'];
+        let langIndex = 0;
+        setInterval(() => {{
+            if (document.getElementById('welcome-screen').classList.contains('active')) {{
+                welcomeText.style.opacity = '0';
+                setTimeout(() => {{
+                    langIndex = (langIndex + 1) % languages.length;
+                    welcomeText.textContent = languages[langIndex];
+                    welcomeText.style.opacity = '1';
+                }}, 200);
+            }}
+        }}, 2500);
+
+        function selectOption(el, type) {{
+            document.querySelectorAll('#type-screen .list-item').forEach(i => i.classList.remove('selected'));
+            el.classList.add('selected');
+            selectedInstallType = type;
+        }}
+
+        function selectDisk(el, diskPath) {{
+            document.querySelectorAll('#disk-screen .list-item').forEach(i => i.classList.remove('selected'));
+            el.classList.add('selected');
+            selectedDisk = diskPath;
+        }}
+
+        function toggleLog() {{
+            const log = document.getElementById('terminal-log');
+            const btn = event.target;
+            if (log.style.display === 'block') {{
+                log.style.display = 'none';
+                btn.textContent = 'Show Details';
+            }} else {{
+                log.style.display = 'block';
+                btn.textContent = 'Hide Details';
+            }}
+        }}
+
+        function startInstall() {{
+            const userData = {{
+                host: document.getElementById('inp-host').value,
+                user: document.getElementById('inp-user').value,
+                pass: document.getElementById('inp-pass').value
+            }};
+            pyBackend.startInstall(selectedInstallType, selectedDisk, JSON.stringify(userData));
+        }}
+
+        function openSettings() {{
+            // Gather all live UI state to send to Python so it can generate the REAL command
+            const currentState = {{
+                install_type: selectedInstallType,
+                disk: selectedDisk,
+                host: document.getElementById('inp-host').value,
+                user: document.getElementById('inp-user').value,
+                pass: document.getElementById('inp-pass').value
+            }};
+            pyBackend.openDebugSettings(JSON.stringify(currentState));
+        }}
+
+        function mockRestart() {{ document.body.style.opacity = '0'; }}
+    </script>
+</body>
+</html>
+"""
+
+# --- Debug Dialog (Rendered by Python) ---
 class DebugDialog(QDialog):
     def __init__(self, parent=None, command="", dry_run=False):
         super().__init__(parent)
         self.setWindowTitle("Installer Settings (Debug)")
-        self.resize(600, 400)
-        
+        self.resize(500, 300)
+        self.setStyleSheet("background: #1c1c1e; color: white;")
+
         layout = QVBoxLayout(self)
         self.chk_dry_run = QCheckBox("Enable Dry Run (Do not write to disk)")
         self.chk_dry_run.setChecked(dry_run)
+        self.chk_dry_run.setStyleSheet("color: white;")
         layout.addWidget(self.chk_dry_run)
-        
+
         layout.addWidget(QLabel("Generated Backend Command:"))
         self.txt_cmd = QTextEdit()
         self.txt_cmd.setPlainText(command)
         self.txt_cmd.setReadOnly(True)
         layout.addWidget(self.txt_cmd)
-        
+
         btn_close = QPushButton("Apply & Close")
         btn_close.clicked.connect(self.accept)
         layout.addWidget(btn_close)
 
-# --- Main Window ---
-class InstallerWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
+# --- Python / JS Bridge ---
+class BackendBridge(QObject):
+    log_message = Signal(str)
 
-        self.os_info = get_os_release()
-        self.distro_name = self.os_info.get("PRETTY_NAME", "Linux Distro")
-        self.determine_target_os()
-
-        self.setWindowTitle(f"Chimera Installer - {self.distro_name}")
-        self.resize(1000, 700)
-
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
         self.dry_run = False
-        # Initialize default data
-        self.install_data = {
-            "install_type": "online",
-            "disk": None, "root": None, "boot": None, "swap": None,
-            "swap_size": 0, "method": "whole",
-            "user": "", "pass": "", "host": "chimera-pc", "tz": "UTC"
-        }
+        self.process = None
 
-        self.setup_ui()
-        self.check_root()
-
-    def determine_target_os(self):
-        distro_name = self.os_info.get("NAME", "Linux")
-        supported_targets = ["arch", "gentoo", "debian", "bal"]
-        self.target_os = "generic"
-
-        if "Blue Archive Linux" in distro_name:
-            self.target_os = "bal"
-        else:
-            distro_id = self.os_info.get("ID")
-            if distro_id in supported_targets:
-                self.target_os = distro_id
-            else:
-                distro_id_like = self.os_info.get("ID_LIKE")
-                if distro_id_like in supported_targets:
-                    self.target_os = distro_id_like
-
-    def check_root(self):
-        if os.geteuid() != 0:
-            QMessageBox.warning(self, "Root Required", "Running without root privileges.\nDisk operations will fail.")
-
-    def check_internet(self):
-        """Checks for internet connection using a simple socket connection (No dependencies)."""
-        try:
-            # Connecting to Cloudflare's public DNS port 53
-            socket.create_connection(("1.1.1.1", 53), timeout=3)
-            return True
-        except OSError:
-            pass
-        return False
-
-    def setup_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-
-        # --- Sidebar ---
-        self.sidebar = QFrame()
-        self.sidebar.setFixedWidth(240)
-        self.sidebar.setFrameShape(QFrame.StyledPanel)
-        
-        side_layout = QVBoxLayout(self.sidebar)
-        side_layout.setContentsMargins(0, 0, 0, 15)
-        side_layout.setSpacing(10)
-
-        logo_key = self.os_info.get("LOGO", "").strip()
-        sys_logo_path = f"/usr/share/pixmaps/{logo_key}.png"
-        lbl_logo = QLabel()
-        lbl_logo.setAlignment(Qt.AlignCenter)
-        lbl_logo.setFixedHeight(140)
-
-        final_logo = None
-        if os.path.exists(sys_logo_path): final_logo = sys_logo_path
-        elif os.path.exists(LOCAL_LOGO_PATH): final_logo = LOCAL_LOGO_PATH
-
-        if final_logo:
-            pix = QPixmap(final_logo).scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            lbl_logo.setPixmap(pix)
-        else:
-            lbl_logo.setText("CHIMERA")
-            font = QFont()
-            font.setBold(True)
-            font.setPointSize(16)
-            lbl_logo.setFont(font)
-
-        side_layout.addWidget(lbl_logo)
-
-        self.step_list = QListWidget()
-        self.step_list.setFocusPolicy(Qt.NoFocus)
-        steps = ["Welcome", "Install Type", "Location", "Disk Setup", "Partitions", "Users", "Summary", "Install"]
-        for s in steps: self.step_list.addItem(StepItem(s))
-        self.step_list.setCurrentRow(0)
-        side_layout.addWidget(self.step_list)
-
-        self.btn_debug = QToolButton()
-        self.btn_debug.setText("⚙")
-        self.btn_debug.setCursor(Qt.PointingHandCursor)
-        self.btn_debug.clicked.connect(self.open_debug_settings)
-        self.btn_debug.setFixedSize(40, 40)
-
-        bot_layout = QHBoxLayout()
-        bot_layout.setContentsMargins(15, 0, 0, 0)
-        bot_layout.addWidget(self.btn_debug)
-        bot_layout.addStretch()
-        side_layout.addLayout(bot_layout)
-        main_layout.addWidget(self.sidebar)
-
-        # --- Content ---
-        self.content_container = QWidget()
-        content_layout = QVBoxLayout(self.content_container)
-        content_layout.setContentsMargins(40, 40, 40, 40)
-
-        self.lbl_header = QLabel(f"Welcome to {self.distro_name}")
-        header_font = QFont()
-        header_font.setPointSize(20)
-        header_font.setBold(True)
-        self.lbl_header.setFont(header_font)
-        content_layout.addWidget(self.lbl_header)
-
-        self.pages = QStackedWidget()
-        content_layout.addWidget(self.pages)
-
-        nav_layout = QHBoxLayout()
-        nav_layout.setContentsMargins(0, 20, 0, 0)
-        self.btn_back = QPushButton("Back")
-        self.btn_next = QPushButton("Next")
-        self.btn_back.clicked.connect(self.go_back)
-        self.btn_next.clicked.connect(self.go_next)
-
-        nav_layout.addStretch()
-        nav_layout.addWidget(self.btn_back)
-        nav_layout.addWidget(self.btn_next)
-        content_layout.addLayout(nav_layout)
-        main_layout.addWidget(self.content_container)
-
-        self.init_pages()
-        self.update_nav()
-
-    def init_pages(self):
-        # 0. Welcome
-        p_welcome = QWidget()
-        vbox = QVBoxLayout(p_welcome)
-        lbl_hero = QLabel()
-        lbl_hero.setAlignment(Qt.AlignCenter)
-        if os.path.exists(BG_PATH):
-            pix = QPixmap(BG_PATH).scaled(700, 350, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            lbl_hero.setPixmap(pix)
-        else:
-            lbl_hero.setText(f"{self.distro_name}\nInstaller")
-            lbl_hero.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
-            lbl_hero.setFixedSize(700, 350)
-
-        welcome_str = f"This wizard will guide you through the installation of {self.distro_name}."
-        lbl_text = QLabel(welcome_str)
-        lbl_text.setAlignment(Qt.AlignCenter)
-        lbl_text.setWordWrap(True)
-        lbl_text.setContentsMargins(0, 20, 0, 0)
-        
-        vbox.addStretch()
-        vbox.addWidget(lbl_hero)
-        vbox.addWidget(lbl_text)
-        vbox.addStretch()
-        self.pages.addWidget(p_welcome)
-
-        # 1. Install Type
-        p_type = QWidget()
-        vbox = QVBoxLayout(p_type)
-        vbox.addWidget(QLabel("Please select your preferred installation method:"))
-
-        grp_type = QGroupBox("Installation Mode")
-        v_type = QVBoxLayout(grp_type)
-
-        self.rad_online = QRadioButton("Online Install (Downloads the latest packages via Internet)")
-        self.rad_offline = QRadioButton("Offline Install (Uses the local packages/SquashFS)")
-        self.rad_online.setChecked(True)
-
-        v_type.addWidget(self.rad_online)
-        v_type.addWidget(self.rad_offline)
-
-        # Check target to disable offline if necessary
-        if self.target_os == "gentoo":
-            self.rad_offline.setEnabled(False)
-            self.rad_offline.setText("Offline Install (Disabled: Gentoo requires Stage3 over Internet)")
-        elif self.target_os == "generic":
-            self.rad_offline.setEnabled(False)
-            self.rad_offline.setText("Offline Install (Disabled: Target 'generic' does not support offline mode)")
-
-        vbox.addWidget(grp_type)
-        vbox.addStretch()
-        self.pages.addWidget(p_type)
-
-        # 2. Location
-        p_loc = QWidget()
-        vbox = QVBoxLayout(p_loc)
-
-        vbox.addWidget(QLabel("Select Region:"))
-        self.cmb_region = QComboBox()
-        self.cmb_region.currentTextChanged.connect(self.populate_cities)
-        vbox.addWidget(self.cmb_region)
-
-        vbox.addWidget(QLabel("Select Zone/City:"))
-        self.cmb_city = QComboBox()
-        vbox.addWidget(self.cmb_city)
-
-        self.populate_regions()
-        vbox.addStretch()
-        self.pages.addWidget(p_loc)
-
-        # 3. Disk Setup
-        p_disk = QWidget()
-        vbox = QVBoxLayout(p_disk)
-        vbox.addWidget(QLabel("Select Storage Drive:"))
-        self.cmb_disk = QComboBox()
-        self.refresh_disks()
-        vbox.addWidget(self.cmb_disk)
-
-        grp = QGroupBox("Partitioning Method")
-        gv = QVBoxLayout()
-        self.rad_erase = QRadioButton("Erase Whole Disk (Automated)")
-        self.rad_erase.setChecked(True)
-        self.rad_manual = QRadioButton("Manual Partitioning")
-        self.rad_erase.toggled.connect(self.toggle_swap_input)
-        gv.addWidget(self.rad_erase)
-        gv.addWidget(self.rad_manual)
-        grp.setLayout(gv)
-        vbox.addWidget(grp)
-
-        self.wid_swap = QWidget()
-        sl = QHBoxLayout(self.wid_swap)
-        sl.setContentsMargins(0,10,0,0)
-        sl.addWidget(QLabel("Swap Size (GB) [0 = No Swap]:"))
-        self.spin_swap = QSpinBox()
-        self.spin_swap.setRange(0, 64)
-        self.spin_swap.setValue(4)
-        sl.addWidget(self.spin_swap)
-        vbox.addWidget(self.wid_swap)
-        vbox.addStretch()
-        self.pages.addWidget(p_disk)
-
-        # 4. Partitions
-        p_part = QWidget()
-        vbox = QVBoxLayout(p_part)
-        info = QLabel("<b>Partition Manager</b><br>Launch the tool below to modify partitions, then Refresh and assign mount points.")
-        vbox.addWidget(info)
-        btn_cfdisk = QPushButton(" Launch Partition Tool (cfdisk)")
-        btn_cfdisk.setIcon(QIcon.fromTheme("utilities-terminal"))
-        btn_cfdisk.clicked.connect(self.launch_cfdisk)
-        vbox.addWidget(btn_cfdisk)
-
-        part_grid = QGroupBox("Mount Point Assignment")
-        pg_layout = QVBoxLayout(part_grid)
-        pg_layout.addWidget(QLabel("Root Partition (/):"))
-        self.cmb_root = QComboBox()
-        pg_layout.addWidget(self.cmb_root)
-        pg_layout.addWidget(QLabel("Boot Partition (/boot or EFI):"))
-        self.cmb_boot = QComboBox()
-        pg_layout.addWidget(self.cmb_boot)
-        pg_layout.addWidget(QLabel("Swap Partition (Optional):"))
-        self.cmb_swap = QComboBox()
-        pg_layout.addWidget(self.cmb_swap)
-        btn_refresh = QPushButton("Refresh Partition List")
-        btn_refresh.clicked.connect(self.populate_partitions)
-        pg_layout.addWidget(btn_refresh)
-        vbox.addWidget(part_grid)
-        vbox.addStretch()
-        self.pages.addWidget(p_part)
-
-        # 5. Users
-        p_user = QWidget()
-        form = QVBoxLayout(p_user)
-        self.inp_host = QLineEdit("chimera-pc")
-        self.inp_user = QLineEdit()
-        self.inp_pass = QLineEdit()
-        self.inp_pass.setEchoMode(QLineEdit.Password)
-        form.addWidget(QLabel("Computer Name (Hostname):"))
-        form.addWidget(self.inp_host)
-        form.addWidget(QLabel("Username:"))
-        form.addWidget(self.inp_user)
-        form.addWidget(QLabel("Password (Root & User):"))
-        form.addWidget(self.inp_pass)
-        form.addStretch()
-        self.pages.addWidget(p_user)
-
-        # 6. Summary
-        p_sum = QWidget()
-        vbox = QVBoxLayout(p_sum)
-        self.txt_sum = QTextEdit()
-        self.txt_sum.setReadOnly(True)
-        vbox.addWidget(QLabel("Installation Summary:"))
-        vbox.addWidget(self.txt_sum)
-        self.pages.addWidget(p_sum)
-
-        # 7. Install
-        p_inst = QWidget()
-        vbox = QVBoxLayout(p_inst)
-        self.lbl_progress = QLabel("Waiting to start...")
-        self.lbl_progress.setAlignment(Qt.AlignCenter)
-        self.pbar = QProgressBar()
-        self.txt_log = QTextEdit()
-        self.txt_log.setReadOnly(True)
-        font_mono = QFont("Monospace")
-        font_mono.setStyleHint(QFont.Monospace)
-        self.txt_log.setFont(font_mono)
-        
-        vbox.addStretch()
-        vbox.addWidget(self.lbl_progress)
-        vbox.addWidget(self.pbar)
-        vbox.addWidget(self.txt_log)
-        vbox.addStretch()
-        self.pages.addWidget(p_inst)
-
-    # --- Timezone Logic ---
-    def populate_regions(self):
-        """Step 1: Populate Regions from directories in /usr/share/zoneinfo"""
-        self.cmb_region.blockSignals(True)
-        self.cmb_region.clear()
-
-        if not os.path.exists(ZONEINFO_PATH):
-            self.cmb_region.addItem("UTC")
-            return
-
-        regions = []
-        has_global_files = False
-
-        # Scan directories
-        for entry in os.listdir(ZONEINFO_PATH):
-            full_path = os.path.join(ZONEINFO_PATH, entry)
-            if os.path.isdir(full_path):
-                # Filter out technical folders
-                if entry not in ["posix", "right", "SystemV", "Etc", "posixrules"]:
-                    regions.append(entry)
-            elif os.path.isfile(full_path) and entry[0].isupper() and not entry.endswith(".tab"):
-                has_global_files = True
-
-        regions.sort()
-        if has_global_files:
-            regions.insert(0, "Global")
-
-        self.cmb_region.addItems(regions)
-        self.cmb_region.blockSignals(False)
-
-        # Auto-Select based on /etc/localtime
-        try:
-            if os.path.islink("/etc/localtime"):
-                real_path = os.readlink("/etc/localtime")
-                parts = real_path.split("zoneinfo/")
-                if len(parts) > 1:
-                    tz_str = parts[1]
-                    if "/" in tz_str:
-                        region, city = tz_str.split("/", 1)
-                        idx = self.cmb_region.findText(region)
-                        if idx >= 0:
-                            self.cmb_region.setCurrentIndex(idx)
-                            self.populate_cities(region)
-                            idx_c = self.cmb_city.findData(tz_str)
-                            if idx_c >= 0: self.cmb_city.setCurrentIndex(idx_c)
-                    else:
-                        self.cmb_region.setCurrentText("Global")
-                        idx_c = self.cmb_city.findText(tz_str)
-                        if idx_c >= 0: self.cmb_city.setCurrentIndex(idx_c)
-        except:
-            pass
-
-        if self.cmb_city.count() == 0:
-            self.populate_cities(self.cmb_region.currentText())
-
-    def populate_cities(self, region):
-        """Step 2: Populate Cities based on Region"""
-        self.cmb_city.clear()
-
-        if region == "Global":
-            for entry in sorted(os.listdir(ZONEINFO_PATH)):
-                full = os.path.join(ZONEINFO_PATH, entry)
-                if os.path.isfile(full) and entry[0].isupper() and not entry.endswith(".tab"):
-                    self.cmb_city.addItem(entry, entry)
-        else:
-            base_path = os.path.join(ZONEINFO_PATH, region)
-            if not os.path.exists(base_path): return
-
-            zones = []
-            for root, dirs, files in os.walk(base_path):
-                for f in files:
-                    if f.startswith(".") or f.endswith(".tab"): continue
-
-                    abs_path = os.path.join(root, f)
-                    rel_display = os.path.relpath(abs_path, base_path)
-                    full_tz = f"{region}/{rel_display}"
-                    zones.append((rel_display, full_tz))
-
-            zones.sort(key=lambda x: x[0])
-            for display, data in zones:
-                self.cmb_city.addItem(display, data)
-
-    # --- Other Logic ---
-    def toggle_swap_input(self):
-        self.wid_swap.setVisible(self.rad_erase.isChecked())
-
-    def refresh_disks(self):
-        self.cmb_disk.clear()
+    @Slot()
+    def loadDisks(self):
+        disks = []
         try:
             cmd = ["lsblk", "-d", "-n", "-o", "NAME,SIZE,MODEL,TYPE", "-J"]
             out = subprocess.check_output(cmd).decode()
             data = json.loads(out)
-            valid = False
             for d in data.get('blockdevices', []):
                 if d['type'] in ['loop', 'rom'] or d['name'].startswith('zram'): continue
                 model = d.get('model', 'Unknown Drive') or "Unknown Drive"
-                self.cmb_disk.addItem(f"{model} ({d['size']}) - /dev/{d['name']}", f"/dev/{d['name']}")
-                valid = True
-            if not valid: self.cmb_disk.addItem("No valid disks found", None)
-        except Exception as e: self.cmb_disk.addItem(f"Error: {e}", None)
+                disks.append({"name": f"{model} ({d['size']}) - /dev/{d['name']}", "path": f"/dev/{d['name']}"})
+        except Exception as e:
+            disks.append({"name": f"Error: {e}", "path": ""})
 
-    def launch_cfdisk(self):
-        disk = self.cmb_disk.currentData()
-        if not disk: return QMessageBox.warning(self, "No Disk", "Please select a valid disk first.")
-        terms = ["konsole", "xterm", "gnome-terminal", "alacritty", "kitty", "xfce4-terminal"]
-        term_cmd = None
-        for t in terms:
-            if shutil.which(t):
-                if t == "konsole": term_cmd = [t, "--hide-menubar", "-e", "cfdisk", disk]
-                elif t == "gnome-terminal": term_cmd = [t, "--", "cfdisk", disk]
-                else: term_cmd = [t, "-e", "cfdisk", disk]
-                break
-        if term_cmd:
-            subprocess.run(term_cmd)
-            self.populate_partitions()
-        else: QMessageBox.critical(self, "Error", "No terminal found.")
+        js_code = "document.getElementById('disk-list').innerHTML = '';"
+        for d in disks:
+            js_code += f"""
+            var div = document.createElement('div');
+            div.className = 'list-item';
+            div.onclick = function() {{ selectDisk(this, '{d["path"]}') }};
+            div.innerHTML = '<span class="item-name">{d["name"]}</span><span class="item-status">Selected</span>';
+            document.getElementById('disk-list').appendChild(div);
+            """
+        self.parent_window.view.page().runJavaScript(js_code)
 
-    def populate_partitions(self):
-        self.cmb_root.clear()
-        self.cmb_boot.clear()
-        self.cmb_swap.clear()
-        self.cmb_swap.addItem("None", None)
-        sel_disk = self.cmb_disk.currentData()
-        if not sel_disk: return
-        try:
-            cmd = ["lsblk", "-l", "-n", "-o", "NAME,SIZE,FSTYPE,TYPE,PKNAME", "-J"]
-            out = subprocess.check_output(cmd).decode()
-            data = json.loads(out)
-            disk_name = sel_disk.replace("/dev/", "")
-            for dev in data.get('blockdevices', []):
-                if dev['type'] == 'part' and dev.get('pkname') == disk_name:
-                    fstype = dev.get('fstype') or "Unformatted"
-                    txt = f"/dev/{dev['name']} ({dev['size']}) - {fstype}"
-                    val = f"/dev/{dev['name']}"
-                    self.cmb_root.addItem(txt, val)
-                    self.cmb_boot.addItem(txt, val)
-                    self.cmb_swap.addItem(txt, val)
-        except Exception as e: print(f"Part error: {e}")
-
-    def get_cmd_list(self):
-        cmd = ["python3", "-u", BACKEND_SCRIPT]
-        d = self.install_data
-
-        # Disk/Partition Arguments
-        if d['method'] == 'whole':
-            disk_val = d['disk'] if d['disk'] else "[NO_DISK]"
-            cmd.extend(["--disk", disk_val])
-            if d.get('swap_size', 0) > 0:
-                cmd.extend(["--swap", f"{d['swap_size']}G"])
-        else:
-            root_val = d['root'] if d['root'] else "[NO_ROOT]"
-            boot_val = d['boot'] if d['boot'] else "[NO_BOOT]"
-            cmd.extend(["--rootfs", root_val])
-            cmd.extend(["--boot", boot_val])
-            if d['swap']:
-                cmd.extend(["--swap", d['swap']])
-
-        # User/System Arguments
-        cmd.extend(["--user", d['user']])
-        cmd.extend(["--passwd", d['pass']])
-        cmd.extend(["--timezone", d['tz']])
-        cmd.extend(["--target", self.target_os])
-
-        # Online/Offline Argument
-        # FIX: Remove --offline flag, simply omit --online for offline mode
-        if d.get("install_type") == "online":
-            cmd.append("--online")
-
-        cmd.append("--i-am-very-stupid")
-        cmd.append("--debug")
-        return cmd
-
-    def open_debug_settings(self):
-        # Update data from widgets immediately to ensure debug command is fresh
-        # Page 1: Install Type
-        if self.rad_offline.isChecked(): self.install_data['install_type'] = "offline"
-        else: self.install_data['install_type'] = "online"
-        
-        # Page 2: Location
-        if self.cmb_city.currentData():
-             self.install_data['tz'] = self.cmb_city.currentData()
-
-        # Page 3: Disk (Whole)
-        if self.cmb_disk.currentData():
-             self.install_data['disk'] = self.cmb_disk.currentData()
-        self.install_data['method'] = "whole" if self.rad_erase.isChecked() else "manual"
-        self.install_data['swap_size'] = self.spin_swap.value()
-
-        # Page 4: Partitions (Manual)
-        if self.cmb_root.currentData(): self.install_data['root'] = self.cmb_root.currentData()
-        if self.cmb_boot.currentData(): self.install_data['boot'] = self.cmb_boot.currentData()
-        if self.cmb_swap.currentData(): self.install_data['swap'] = self.cmb_swap.currentData()
-
-        # Page 5: Users
-        self.install_data['user'] = self.inp_user.text()
-        self.install_data['pass'] = self.inp_pass.text()
-        self.install_data['host'] = self.inp_host.text()
-
-        # Capture dry_run state for dialog init
-        dlg = DebugDialog(self, " ".join(self.get_cmd_list()), self.dry_run)
-        if dlg.exec():
-            self.dry_run = dlg.chk_dry_run.isChecked()
-
-    def go_next(self):
-        idx = self.pages.currentIndex()
-
-        # Page 1: Install Type
-        if idx == 1:
-            self.install_data['install_type'] = "offline" if self.rad_offline.isChecked() else "online"
-
-            if self.install_data['install_type'] == "online":
-                while not self.check_internet():
-                    msg = QMessageBox(self)
-                    msg.setIcon(QMessageBox.Warning)
-                    msg.setWindowTitle("No Internet Connection")
-                    msg.setText("An active internet connection is required for an Online Install.\nPlease connect to a network and try again.")
-                    btn_retry = msg.addButton("Retry", QMessageBox.AcceptRole)
-                    btn_cancel = msg.addButton("Cancel", QMessageBox.RejectRole)
-                    msg.exec()
-
-                    if msg.clickedButton() == btn_cancel:
-                        return # User cancelled, stay on current page
-
-        # Page 2: Location
-        if idx == 2:
-            tz = self.cmb_city.currentData()
-            if not tz:
-                return QMessageBox.warning(self, "Error", "Please select a timezone.")
-            self.install_data['tz'] = tz
-
-        # Page 3: Disk Setup
-        if idx == 3:
-            self.install_data['disk'] = self.cmb_disk.currentData()
-            if not self.install_data['disk']: return QMessageBox.warning(self, "Error", "Please select a disk.")
-            self.install_data['method'] = "whole" if self.rad_erase.isChecked() else "manual"
-            self.install_data['swap_size'] = self.spin_swap.value()
-            if self.install_data['method'] == "whole":
-                self.pages.setCurrentIndex(5) # Skip Partitions, jump to Users
-                self.step_list.setCurrentRow(5)
-                self.update_nav()
-                return
-            else: self.populate_partitions()
-
-        # Page 4: Partitions
-        if idx == 4:
-            r, b = self.cmb_root.currentData(), self.cmb_boot.currentData()
-            if not r or not b: return QMessageBox.warning(self, "Error", "Root and Boot partitions required.")
-            if r == b: return QMessageBox.warning(self, "Error", "Root and Boot cannot be the same.")
-            self.install_data['root'] = r
-            self.install_data['boot'] = b
-            self.install_data['swap'] = self.cmb_swap.currentData()
-
-        # Page 5: Users
-        if idx == 5:
-            u, p = self.inp_user.text(), self.inp_pass.text()
-            if not u or not p: return QMessageBox.warning(self, "Error", "User and Password required.")
-            self.install_data['user'] = u
-            self.install_data['pass'] = p
-            self.install_data['host'] = self.inp_host.text()
-            self.generate_summary()
-
-        # Page 6: Summary -> Install
-        if idx == 6:
-            if not self.dry_run:
-                if QMessageBox.question(self, "Confirm", "Disk changes are permanent. Proceed?", QMessageBox.Yes|QMessageBox.No) != QMessageBox.Yes: return
-            self.start_install()
-            return
-
-        if idx < self.pages.count() - 1:
-            self.pages.setCurrentIndex(idx + 1)
-            self.step_list.setCurrentRow(idx + 1)
-
-        self.update_nav()
-
-    def go_back(self):
-        idx = self.pages.currentIndex()
-        if idx == 5 and self.install_data['method'] == 'whole':
-            self.pages.setCurrentIndex(3)
-            self.step_list.setCurrentRow(3)
-        elif idx > 0:
-            self.pages.setCurrentIndex(idx - 1)
-            self.step_list.setCurrentRow(idx - 1)
-        self.update_nav()
-
-    def update_nav(self):
-        idx = self.pages.currentIndex()
-        if idx < self.step_list.count():
-             self.step_list.setCurrentRow(idx)
-             self.lbl_header.setText(self.step_list.item(idx).text())
-
-        self.btn_back.setVisible(idx > 0 and idx < 7)
-        self.btn_next.setVisible(idx < 7)
-
-        if idx == 6:
-            self.btn_next.setText("Install Now")
-        else:
-            self.btn_next.setText("Next")
-
-    def generate_summary(self):
-        d = self.install_data
-        html = f"""
-        <h3>System Configuration</h3>
-        <b>Distro:</b> {self.distro_name}<br><b>Hostname:</b> {d['host']}<br>
-        <b>Timezone:</b> {d['tz']}<br><b>User:</b> {d['user']}<br>
-        <b>Install Mode:</b> {d['install_type'].capitalize()}<br>
-        <h3>Storage Configuration</h3>
-        """
-        if d['method'] == 'whole': html += f"<b>Mode:</b> Erase Whole Disk<br><b>Target:</b> {d['disk']}<br><b>Swap:</b> {d['swap_size']} GB"
-        else: html += f"<b>Mode:</b> Manual Partitioning<br><b>Root:</b> {d['root']}<br><b>Boot:</b> {d['boot']}<br><b>Swap:</b> {d['swap']}"
-        self.txt_sum.setHtml(html)
-
-    def start_install(self):
-        self.pages.setCurrentIndex(7)
-        self.step_list.setCurrentRow(7)
-        self.update_nav()
-        cmd = self.get_cmd_list()
+    @Slot(str, str, str)
+    def startInstall(self, install_type, disk_path, user_data_json):
+        user_data = json.loads(user_data_json)
+        cmd = self.build_command(install_type, disk_path, user_data)
 
         if self.dry_run:
-            self.txt_log.append("--- DRY RUN MODE ---")
-            self.txt_log.append(f"Command:\n{' '.join(cmd)}")
-            self.pbar.setValue(100)
-            self.lbl_progress.setText("Dry Run Complete")
+            self.log_message.emit("--- DRY RUN MODE ---\n" + " ".join(cmd) + "\n")
+            self.update_progress(100, "Dry Run Complete")
             return
 
         self.process = QProcess()
@@ -717,30 +381,110 @@ class InstallerWindow(QMainWindow):
         self.process.readyReadStandardOutput.connect(self.read_output)
         self.process.finished.connect(self.install_finished)
         self.process.start(cmd[0], cmd[1:])
-        self.pbar.setRange(0, 0)
+
+    def build_command(self, install_type, disk_path, user_data):
+        cmd = ["python3", "-u", BACKEND_SCRIPT]
+
+        if disk_path:
+            cmd.extend(["--disk", disk_path])
+            cmd.extend(["--swap", "4G"])
+
+        cmd.extend(["--user", user_data.get('user', '')])
+        cmd.extend(["--passwd", user_data.get('pass', '')])
+        cmd.extend(["--timezone", "UTC"])
+
+        # Dynamically set target ID falling back to arch
+        os_info = get_os_release()
+        cmd.extend(["--target", os_info.get("ID", "arch")])
+
+        if install_type == "online": cmd.append("--online")
+        cmd.extend(["--i-am-very-stupid", "--debug"])
+        return cmd
 
     def read_output(self):
         data = self.process.readAllStandardOutput().data().decode()
-        self.txt_log.moveCursor(QTextCursor.End)
-        self.txt_log.insertPlainText(data)
-        self.txt_log.moveCursor(QTextCursor.End)
+        self.log_message.emit(data)
+
         lower = data.lower()
-        if "partitioning" in lower: self.lbl_progress.setText("Partitioning Disk...")
-        if "installing base" in lower: self.lbl_progress.setText("Installing Base System...")
-        if "configuring" in lower: self.lbl_progress.setText("Configuring System...")
-        if "bootloader" in lower: self.lbl_progress.setText("Installing Bootloader...")
+        if "partitioning" in lower: self.update_progress(20, "Partitioning Disk...")
+        elif "installing base" in lower: self.update_progress(50, "Installing Base System...")
+        elif "configuring" in lower: self.update_progress(75, "Configuring System...")
+        elif "bootloader" in lower: self.update_progress(90, "Installing Bootloader...")
 
     def install_finished(self):
         if self.process.exitCode() == 0:
-            self.pbar.setRange(0, 100)
-            self.pbar.setValue(100)
-            self.lbl_progress.setText("Installation Successful!")
-            QMessageBox.information(self, "Done", "Installation finished successfully.")
+            self.update_progress(100, "Installation Successful!")
         else:
-            self.pbar.setRange(0, 100)
-            self.pbar.setValue(0)
-            self.lbl_progress.setText("Installation Failed")
-            QMessageBox.critical(self, "Error", "Installation failed. Check the log.")
+            self.update_progress(0, "Installation Failed")
+
+    def update_progress(self, val, status):
+        js_code = f"""
+        document.getElementById('progress-percent').innerText = '{val}%';
+        document.getElementById('install-status').style.opacity = 0;
+        setTimeout(() => {{
+            document.getElementById('install-status').innerText = '{status}';
+            document.getElementById('install-status').style.opacity = 1;
+        }}, 150);
+        var ring = document.querySelector('.ring-fill');
+        var offset = 502 - ({val} / 100) * 502;
+        ring.style.strokeDashoffset = offset;
+        if({val} == 100) {{
+            setTimeout(() => transitionTo('complete-screen'), 1000);
+        }}
+        """
+        self.parent_window.view.page().runJavaScript(js_code)
+
+    @Slot(str)
+    def openDebugSettings(self, state_json):
+        # Parse live state sent from JavaScript
+        state = json.loads(state_json)
+
+        # Build the REAL command using the exact same logic as startInstall
+        cmd = self.build_command(state['install_type'], state['disk'], state)
+
+        # Show dialog
+        dlg = DebugDialog(self.parent_window, " ".join(cmd), self.dry_run)
+        if dlg.exec():
+            self.dry_run = dlg.chk_dry_run.isChecked()
+
+# --- Main Window ---
+class InstallerWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        # Read parameters strictly from os-release
+        os_info = get_os_release()
+        distro_name = os_info.get("PRETTY_NAME", os_info.get("NAME", "Linux Installer"))
+        logo_name = os_info.get("LOGO", "")
+        logo_uri = load_logo_data_uri(logo_name)
+        hostname = f"{os_info.get('ID', 'linux')}-pc"
+
+        self.setWindowTitle(f"{distro_name} Installer")
+        self.resize(800, 600)
+        self.setStyleSheet("background: black;")
+
+        self.view = QWebEngineView()
+        self.setCentralWidget(self.view)
+
+        self.channel = QWebChannel()
+        self.backend = BackendBridge(self)
+        self.channel.registerObject("backend", self.backend)
+        self.view.page().setWebChannel(self.channel)
+
+        html_content = build_html(distro_name, logo_uri, hostname)
+        self.view.setHtml(html_content)
+
+        self.backend.log_message.connect(self.append_log)
+
+    def append_log(self, text):
+        safe_text = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+        js_code = f"""
+        var log = document.getElementById('terminal-log');
+        log.innerHTML += '{safe_text}';
+        log.scrollTop = log.scrollHeight;
+        """
+        self.view.page().runJavaScript(js_code)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
