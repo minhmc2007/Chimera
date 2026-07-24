@@ -12,6 +12,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 
 # --- Configuration ---
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --use-gl=egl"
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKEND_SCRIPT = "/usr/share/chimera/chimera.py"
 ZONEINFO_PATH = "/usr/share/zoneinfo"
