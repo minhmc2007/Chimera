@@ -5,6 +5,7 @@ import subprocess
 import json
 import shutil
 import socket
+import base64
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QDialog,
                                QVBoxLayout, QCheckBox, QTextEdit, QPushButton, QLabel)
 from PySide6.QtCore import Qt, QProcess, QTimer, QObject, Slot, Signal
@@ -12,7 +13,6 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 
 # --- Configuration ---
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --use-gl=egl"
 ASSET_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKEND_SCRIPT = "/usr/share/chimera/chimera.py"
 ZONEINFO_PATH = "/usr/share/zoneinfo"
@@ -32,17 +32,13 @@ def get_os_release():
     return info
 
 def load_logo_data_uri(logo_name=""):
-    import base64
     paths = []
-
-    # Try looking for OS specific logos first
     if logo_name:
         paths.append(f"/usr/share/pixmaps/{logo_name}.png")
         paths.append(f"/usr/share/pixmaps/{logo_name}.svg")
         paths.append(f"/usr/share/icons/{logo_name}.png")
         paths.append(f"/usr/share/icons/{logo_name}.svg")
 
-    # Fallbacks
     paths.append(LOCAL_LOGO)
     paths.append("/usr/share/pixmaps/chimera.png")
 
@@ -66,7 +62,8 @@ def build_html(distro_name, logo_uri, hostname):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{distro_name} Installer</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Inter + Noto Sans CJK Webfonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
     <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <style>
         :root {{
@@ -81,7 +78,16 @@ def build_html(distro_name, logo_uri, hostname):
             --smooth-curve: cubic-bezier(0.22, 1, 0.36, 1);
         }}
         * {{ margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-font-smoothing: antialiased; }}
-        body {{ font-family: 'Inter', sans-serif; background: var(--bg-color); color: var(--text-primary); overflow: hidden; height: 100vh; width: 100vw; cursor: default; }}
+        body {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Noto Sans', 'Noto Sans CJK SC', 'Noto Sans SC', 'Noto Sans CJK JP', 'Noto Sans JP', 'WenQuanYi Micro Hei', sans-serif;
+            background: var(--bg-color);
+            color: var(--text-primary);
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+            cursor: default;
+            transition: opacity 0.5s ease;
+        }}
 
         #bg-canvas {{ position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 0; filter: blur(80px) saturate(150%); opacity: 0.4; }}
         .blob {{ position: absolute; border-radius: 50%; mix-blend-mode: screen; animation: float 20s infinite ease-in-out; }}
@@ -218,7 +224,7 @@ def build_html(distro_name, logo_uri, hostname):
             <div class="checkmark"><svg viewBox="0 0 50 50"><path d="M14 27l5 5 16-16" /></svg></div>
             <h1 style="font-size: 40px; font-weight: 700; margin-bottom: 20px;">All Set.</h1>
             <p class="subtitle" style="margin-bottom: 40px;">{distro_name} has been successfully installed.</p>
-            <button class="btn-primary" onclick="mockRestart()">Restart</button>
+            <button class="btn-primary" onclick="restartSystem()">Restart</button>
         </section>
     </div>
 
@@ -291,7 +297,6 @@ def build_html(distro_name, logo_uri, hostname):
         }}
 
         function openSettings() {{
-            // Gather all live UI state to send to Python so it can generate the REAL command
             const currentState = {{
                 install_type: selectedInstallType,
                 disk: selectedDisk,
@@ -302,7 +307,14 @@ def build_html(distro_name, logo_uri, hostname):
             pyBackend.openDebugSettings(JSON.stringify(currentState));
         }}
 
-        function mockRestart() {{ document.body.style.opacity = '0'; }}
+        function restartSystem() {{
+            document.body.style.opacity = '0';
+            setTimeout(() => {{
+                if (pyBackend && pyBackend.rebootSystem) {{
+                    pyBackend.rebootSystem();
+                }}
+            }}, 600);
+        }}
     </script>
 </body>
 </html>
@@ -394,7 +406,6 @@ class BackendBridge(QObject):
         cmd.extend(["--passwd", user_data.get('pass', '')])
         cmd.extend(["--timezone", "UTC"])
 
-        # Dynamically set target ID falling back to arch
         os_info = get_os_release()
         cmd.extend(["--target", os_info.get("ID", "arch")])
 
@@ -437,23 +448,35 @@ class BackendBridge(QObject):
 
     @Slot(str)
     def openDebugSettings(self, state_json):
-        # Parse live state sent from JavaScript
         state = json.loads(state_json)
-
-        # Build the REAL command using the exact same logic as startInstall
         cmd = self.build_command(state['install_type'], state['disk'], state)
 
-        # Show dialog
         dlg = DebugDialog(self.parent_window, " ".join(cmd), self.dry_run)
         if dlg.exec():
             self.dry_run = dlg.chk_dry_run.isChecked()
+
+    @Slot()
+    def rebootSystem(self):
+        """Triggers the actual system reboot or closes cleanly in Dry Run mode."""
+        if self.dry_run:
+            self.log_message.emit("--- DRY RUN: System reboot requested ---")
+            QApplication.quit()
+            return
+
+        try:
+            # Issue system reboot
+            subprocess.run(["systemctl", "reboot"], check=False)
+            subprocess.run(["reboot"], check=False)
+        except Exception as e:
+            print(f"Reboot command error: {e}")
+
+        QApplication.quit()
 
 # --- Main Window ---
 class InstallerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        # Read parameters strictly from os-release
         os_info = get_os_release()
         distro_name = os_info.get("PRETTY_NAME", os_info.get("NAME", "Linux Installer"))
         logo_name = os_info.get("LOGO", "")
@@ -488,6 +511,9 @@ class InstallerWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    # Fix for running as root + hardware acceleration in VMs/VirGL
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --use-gl=egl"
+
     app = QApplication(sys.argv)
     win = InstallerWindow()
     win.show()

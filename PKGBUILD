@@ -1,7 +1,7 @@
 # Maintainer: minhmc2007 <quangminh21072010@gmail.com>
 pkgname=chimera-installer
 pkgver=1.0.5
-pkgrel=2
+pkgrel=3
 pkgdesc="A custom Linux installer written in Python and PySide6"
 arch=('any')
 url="https://github.com/minhmc2007/Chimera"
