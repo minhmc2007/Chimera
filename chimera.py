@@ -167,7 +167,6 @@ class ChimeraInstaller:
         set_progress(20, "Partitioning Disk...")
         log("Preparing Partitions...", "info")
 
-        # [FIX] Check if mounted before unmounting to prevent harmless error logs
         if os.path.exists(MOUNT_POINT) and os.path.ismount(MOUNT_POINT):
             self.run_cmd(["umount", "-R", MOUNT_POINT], check=False)
 
@@ -248,7 +247,7 @@ class ChimeraInstaller:
         if self.args.online:
             excludes.append("--exclude=/var/cache/pacman/pkg/*")
 
-        self.run_cmd(["rsync", "-axHAWXS", "--numeric-ids", "--info=progress2"] + excludes + ["/", MOUNT_POINT])
+        self.run_cmd(["rsync", "-axAWS", "--numeric-ids"] + excludes + ["/", MOUNT_POINT])
 
         if shutil.which("genfstab"):
             with open(f"{MOUNT_POINT}/etc/fstab", "w") as f:
@@ -317,8 +316,13 @@ class ChimeraInstaller:
         if self.args.kernel and self.args.kernel != "linux":
             pkgs.extend([self.args.kernel, f"{self.args.kernel}-headers"])
         if self.args.zram: pkgs.append("zram-generator")
-        if self.args.audio == "pipewire": pkgs.extend(["pipewire", "pipewire-pulse", "pipewire-alsa", "pipewire-jack", "wireplumber"])
-        elif self.args.audio == "pulseaudio": pkgs.extend(["pulseaudio", "pulseaudio-alsa"])
+
+        # [FIX] Removed pipewire-jack from default list to prevent conflicts with pre-installed jack2
+        if self.args.audio == "pipewire":
+            pkgs.extend(["pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber"])
+        elif self.args.audio == "pulseaudio":
+            pkgs.extend(["pulseaudio", "pulseaudio-alsa"])
+
         if self.args.bluetooth: pkgs.extend(["bluez", "bluez-utils"])
 
         if self.args.online:

@@ -451,6 +451,12 @@ def build_html(distro_name, logo_uri, hostname):
         function appendLog(text) {{
             const log = document.getElementById('terminal-log');
             log.appendChild(document.createTextNode(text));
+
+            // DOM memory pruner to keep memory low while preserving responsiveness
+            while (log.childNodes.length > 200) {{
+                log.removeChild(log.firstChild);
+            }}
+
             log.scrollTop = log.scrollHeight;
         }}
 
@@ -621,7 +627,6 @@ class BackendBridge(QObject):
         data = self.process.readAllStandardOutput().data().decode()
         self.log_message.emit(data)
 
-        # [FIX] Read explicit progress tags emitted by backend
         matches = re.findall(r'\[PROGRESS:(\d+)\]\s*(.*)', data)
         for val_str, status in matches:
             self.update_progress(int(val_str), status)
@@ -699,14 +704,14 @@ class InstallerWindow(QMainWindow):
         self.backend.log_message.connect(self.append_log)
 
     def append_log(self, text):
-        # [FIX] Strip ANSI color control codes so raw codes don't clutter the terminal log box
         clean_text = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', text)
         safe_text = json.dumps(clean_text)
         js_code = f"appendLog({safe_text});"
         self.view.page().runJavaScript(js_code)
 
 if __name__ == "__main__":
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --use-gl=egl"
+    # GPU Acceleration enabled for smooth UI glassmorphism/spring transitions
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --use-gl=egl --ignore-gpu-blocklist --enable-gpu-rasterization"
     app = QApplication(sys.argv)
     win = InstallerWindow()
     win.show()
