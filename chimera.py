@@ -311,7 +311,7 @@ class ChimeraInstaller:
 
         self.run_cmd(["systemctl", "enable", "NetworkManager"], chroot=True, check=False)
 
-        # Build list of packages to install
+        # Packages Setup
         pkgs = []
         if self.args.kernel and self.args.kernel != "linux":
             pkgs.extend([self.args.kernel, f"{self.args.kernel}-headers"])
@@ -324,15 +324,15 @@ class ChimeraInstaller:
             
         if self.args.bluetooth: pkgs.extend(["bluez", "bluez-utils"])
 
-        # Online mode: Update system FIRST
         if self.args.online:
             log("Online Mode: Initializing keyring and upgrading system...", "info")
             self.run_cmd(["pacman-key", "--init"], chroot=True, check=False)
             self.run_cmd(["pacman-key", "--populate"], chroot=True, check=False)
             self.run_cmd(["pacman", "-Syuu", "--noconfirm"], chroot=True)
 
-        # [FIX] Run the removal of conflicting packages AFTER -Syuu so they don't get reinstalled by dependencies!
-        if self.args.audio == "pipewire":
+        # [FIX] Force removal of conflicting jack/jack2 AFTER the system update, 
+        # ensuring dependencies don't reinstall it before pipewire-jack gets installed.
+        if self.args.audio == "pipewire": 
             log("Removing legacy jack packages to prevent Pipewire conflicts...", "info")
             self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack", "jack2"], chroot=True, check=False)
             
