@@ -330,11 +330,28 @@ class ChimeraInstaller:
             self.run_cmd(["pacman-key", "--populate"], chroot=True, check=False)
             self.run_cmd(["pacman", "-Syuu", "--noconfirm"], chroot=True)
 
-        # [FIX] Force removal of conflicting jack/jack2 AFTER the system update, 
-        # ensuring dependencies don't reinstall it before pipewire-jack gets installed.
+        # [FIX] Force removal of conflicting jack/jack2 AFTER the system update.
+        #
+        # BUG: The original code ran "pacman -Rdd jack jack2" as a single command.
+        # On Arch Linux, jack2 PROVIDES jack, so "jack" is usually NOT a standalone
+        # package. When pacman encounters "target not found: jack", it aborts the
+        # ENTIRE transaction, leaving jack2 still installed. Then "pacman -S pipewire-jack"
+        # fails with "unresolvable package conflicts detected" because jack2 is still present.
+        #
+        # FIX: Remove each conflicting package SEPARATELY so that a "target not found"
+        # error on one package does not prevent removal of the others.
         if self.args.audio == "pipewire": 
-            log("Removing legacy jack packages to prevent Pipewire conflicts...", "info")
-            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack", "jack2"], chroot=True, check=False)
+            log("Removing legacy audio packages to prevent Pipewire conflicts...", "info")
+            # Remove jack2 first (this is the real package; jack2 provides jack)
+            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack2"], chroot=True, check=False)
+            # Remove jack separately (may not exist as standalone package)
+            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack"], chroot=True, check=False)
+            # Remove pipewire-jack in case of a previous partial install
+            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "pipewire-jack"], chroot=True, check=False)
+            # Remove pulseaudio packages since pipewire-pulse replaces them
+            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "pulseaudio"], chroot=True, check=False)
+            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "pulseaudio-alsa"], chroot=True, check=False)
+            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "pipewire-pulse"], chroot=True, check=False)
             
         if pkgs:
             if self.args.online:
