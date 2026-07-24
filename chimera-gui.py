@@ -5,6 +5,7 @@ import subprocess
 import json
 import socket
 import base64
+import re
 from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtCore import QProcess, QObject, Slot, Signal, QProcessEnvironment
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -153,7 +154,7 @@ def build_html(distro_name, logo_uri, hostname):
         .progress-ring-container {{ position: relative; width: 160px; height: 160px; margin-bottom: 30px; }}
         .progress-ring {{ transform: rotate(-90deg); width: 100%; height: 100%; }}
         .ring-bg {{ stroke: rgba(255,255,255,0.1); stroke-width: 8; fill: transparent; }}
-        .ring-fill {{ stroke: var(--accent-1); stroke-width: 8; fill: transparent; stroke-linecap: round; stroke-dasharray: 502; stroke-dashoffset: 502; transition: stroke-dashoffset 0.2s linear; }}
+        .ring-fill {{ stroke: var(--accent-1); stroke-width: 8; fill: transparent; stroke-linecap: round; stroke-dasharray: 440; stroke-dashoffset: 440; transition: stroke-dashoffset 0.3s ease; }}
         .progress-text {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 40px; font-weight: 600; }}
 
         #terminal-log {{ width: 100%; height: 120px; background: rgba(0,0,0,0.6); border: 1px solid var(--glass-border); border-radius: 12px; padding: 12px; color: #0aff; font-family: monospace; font-size: 11px; overflow-y: auto; display: none; white-space: pre-wrap; }}
@@ -604,7 +605,6 @@ class BackendBridge(QObject):
             self.update_progress(100, "Dry Run Complete")
             return
 
-        # Parent QProcess to self so PySide lifecycle handles it safely
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.MergedChannels)
 
@@ -621,11 +621,10 @@ class BackendBridge(QObject):
         data = self.process.readAllStandardOutput().data().decode()
         self.log_message.emit(data)
 
-        lower = data.lower()
-        if "partitioning" in lower: self.update_progress(20, "Partitioning Disk...")
-        elif "installing base" in lower or "rsync" in lower or "copying base" in lower: self.update_progress(50, "Installing Base System...")
-        elif "configuring system" in lower: self.update_progress(75, "Configuring System...")
-        elif "bootloader" in lower: self.update_progress(90, "Installing Bootloader...")
+        # [FIX] Read explicit progress tags emitted by backend
+        matches = re.findall(r'\[PROGRESS:(\d+)\]\s*(.*)', data)
+        for val_str, status in matches:
+            self.update_progress(int(val_str), status)
 
     @Slot(int, QProcess.ExitStatus)
     def install_finished(self, exit_code, exit_status):
@@ -643,7 +642,7 @@ class BackendBridge(QObject):
             document.getElementById('install-status').style.opacity = 1;
         }}, 150);
         var ring = document.querySelector('.ring-fill');
-        var offset = 502 - ({val} / 100) * 502;
+        var offset = 440 - ({val} / 100) * 440;
         ring.style.strokeDashoffset = offset;
         if({val} == 100) {{
             setTimeout(() => transitionTo('complete-screen'), 1000);
@@ -700,7 +699,9 @@ class InstallerWindow(QMainWindow):
         self.backend.log_message.connect(self.append_log)
 
     def append_log(self, text):
-        safe_text = json.dumps(text)
+        # [FIX] Strip ANSI color control codes so raw codes don't clutter the terminal log box
+        clean_text = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', text)
+        safe_text = json.dumps(clean_text)
         js_code = f"appendLog({safe_text});"
         self.view.page().runJavaScript(js_code)
 

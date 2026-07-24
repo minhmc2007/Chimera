@@ -28,7 +28,10 @@ def log(msg, level="info"):
     elif level == "HEADER": icon, color = "[#]", COLORS['HEADER']
     elif level == "DEBUG": icon, color = "[D]", COLORS['WARN']
 
-    print(f"{color}{icon} {msg}{COLORS['ENDC']}")
+    print(f"{color}{icon} {msg}{COLORS['ENDC']}", flush=True)
+
+def set_progress(percent, status_msg):
+    print(f"[PROGRESS:{percent}] {status_msg}", flush=True)
 
 def check_connection():
     for host, port in [("8.8.8.8", 53), ("1.1.1.1", 53), ("google.com", 443)]:
@@ -86,8 +89,11 @@ class ChimeraInstaller:
             log(f"CMD: {cmd}", "DEBUG")
 
         kwargs = {'shell': shell, 'env': env}
+
         if input_data is not None:
             kwargs['input'] = input_data.encode('utf-8')
+        else:
+            kwargs['stdin'] = subprocess.DEVNULL
 
         if not show_output:
             kwargs['stdout'] = subprocess.PIPE
@@ -126,6 +132,7 @@ class ChimeraInstaller:
         try:
             if self.args.dry_run:
                 log("DRY RUN MODE ACTIVE", "info")
+                set_progress(100, "Dry Run Complete")
                 sys.exit(0)
 
             self.welcome()
@@ -138,6 +145,7 @@ class ChimeraInstaller:
             self.setup_users()
             self.install_bootloader()
             self.cleanup()
+            set_progress(100, "Installation Successful!")
             log("Installation Successfully Completed.", "success")
         except Exception as e:
             log(f"Critical Failure: {e}", "error")
@@ -156,8 +164,12 @@ class ChimeraInstaller:
                 raise RuntimeError("No Internet Connection. Required for Online mode.")
 
     def partition_handler(self):
+        set_progress(20, "Partitioning Disk...")
         log("Preparing Partitions...", "info")
-        self.run_cmd(["umount", "-R", MOUNT_POINT], check=False)
+
+        # [FIX] Check if mounted before unmounting to prevent harmless error logs
+        if os.path.exists(MOUNT_POINT) and os.path.ismount(MOUNT_POINT):
+            self.run_cmd(["umount", "-R", MOUNT_POINT], check=False)
 
         if self.args.disk_mode == "auto":
             try:
@@ -225,6 +237,7 @@ class ChimeraInstaller:
         self.run_cmd(["udevadm", "settle"])
 
     def install_base(self):
+        set_progress(50, "Installing Base System...")
         log(f"Copying Base System (Preserving custom distro files)...", "info")
         excludes = [
             "--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*",
@@ -256,6 +269,7 @@ class ChimeraInstaller:
             f.write("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
 
     def configure_system(self):
+        set_progress(75, "Configuring System...")
         log("Configuring System Locale & Time...", "info")
 
         with open(f"{MOUNT_POINT}/etc/hostname", "w") as f:
@@ -294,7 +308,7 @@ class ChimeraInstaller:
 
         if self.args.mirror_region and shutil.which("reflector", path=f"{MOUNT_POINT}/usr/bin"):
             log(f"Setting Pacman Mirror Region to {self.args.mirror_region}...", "info")
-            self.run_cmd(["reflector", "--country", self.args.mirror_region, "--save", "/etc/pacman.d/mirrorlist", "--protocol", "https", "--latest", "5"], chroot=True, check=False)
+            self.run_cmd(["reflector", "--country", self.args.mirror_region, "--save", "/etc/pacman.d/mirrorlist", "--protocol", "https", "--latest", "5", "--download-timeout", "5"], chroot=True, check=False)
 
         self.run_cmd(["systemctl", "enable", "NetworkManager"], chroot=True, check=False)
 
@@ -363,6 +377,7 @@ class ChimeraInstaller:
             os.chmod(sudoers_file, 0o440)
 
     def install_bootloader(self):
+        set_progress(90, "Installing Bootloader...")
         log("Installing GRUB Bootloader...", "info")
         grub_path = f"{MOUNT_POINT}/etc/default/grub"
         if os.path.exists(grub_path):
