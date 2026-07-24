@@ -317,9 +317,10 @@ class ChimeraInstaller:
             pkgs.extend([self.args.kernel, f"{self.args.kernel}-headers"])
         if self.args.zram: pkgs.append("zram-generator")
 
-        # [FIX] Removed pipewire-jack from default list to prevent conflicts with pre-installed jack2
         if self.args.audio == "pipewire":
-            pkgs.extend(["pipewire", "pipewire-pulse", "pipewire-alsa", "wireplumber"])
+            # [FIX] Force removal of conflicting jack2 before pipewire-jack installation
+            self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack2"], chroot=True, check=False)
+            pkgs.extend(["pipewire", "pipewire-pulse", "pipewire-alsa", "pipewire-jack", "wireplumber"])
         elif self.args.audio == "pulseaudio":
             pkgs.extend(["pulseaudio", "pulseaudio-alsa"])
 
