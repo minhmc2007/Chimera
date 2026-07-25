@@ -271,6 +271,7 @@ class ChimeraInstaller:
         log("Seeding Kernel and sanitizing mkinitcpio...", "warn")
         
         # We must ALWAYS seed standard 'linux' so clone-based presets don't fail pacman hooks.
+        # This copies the live-usb kernel to the target's /boot/vmlinuz-linux.
         kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-linux"
         os.makedirs(os.path.dirname(kernel_dst), exist_ok=True)
         
@@ -334,6 +335,8 @@ class ChimeraInstaller:
             os.remove(archiso_conf)
 
         log("Rebuilding base initramfs...", "info")
+        # Run mkinitcpio -P without check=True initially, as it might fail if kernel modules aren't fully in place yet.
+        # A full mkinitcpio will be run again by pacman hooks later if packages are installed.
         self.run_cmd(["mkinitcpio", "-P"], chroot=True, stream=True, check=False)
 
     def configure_system(self):
@@ -380,7 +383,6 @@ class ChimeraInstaller:
 
         self.run_cmd(["systemctl", "enable", "NetworkManager"], chroot=True, check=False)
 
-        # --- FIX APPLIED HERE ---
         # We must seed the kernel and fix mkinitcpio presets BEFORE pacman runs
         # otherwise hooks triggered by pacman installations/updates will crash.
         self._setup_kernel_initramfs()
@@ -404,7 +406,7 @@ class ChimeraInstaller:
             self.run_cmd(["pacman-key", "--populate"], chroot=True, check=False)
             self.run_cmd(["pacman", "-Syuu", "--noconfirm"], chroot=True)
 
-        # [FIX] Force removal of conflicting jack/jack2 AFTER the system update.
+        # Force removal of conflicting jack/jack2 AFTER the system update.
         if self.args.audio == "pipewire": 
             log("Removing legacy audio packages to prevent Pipewire conflicts...", "info")
             self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack2"], chroot=True, check=False)
@@ -467,16 +469,39 @@ class ChimeraInstaller:
         set_progress(90, "Installing Bootloader...")
         log("Installing GRUB Bootloader...", "info")
         grub_path = f"{MOUNT_POINT}/etc/default/grub"
-        if os.path.exists(grub_path):
-            with open(grub_path, 'r') as f: lines = f.readlines()
-            with open(grub_path, 'w') as f:
-                for line in lines:
-                    if line.strip().startswith("GRUB_CMDLINE_LINUX_DEFAULT="):
-                        f.write(line.replace("quiet", "").replace("  ", " "))
-                    else:
-                        f.write(line)
         
+        # --- RE-ADDED LOGIC FOR GRUB_DISTRIBUTOR ---
+        pretty_name = self.target_os.capitalize()
+        os_release = f"{MOUNT_POINT}/etc/os-release"
+        if os.path.exists(os_release):
+            try:
+                with open(os_release, 'r') as f:
+                    for line in f:
+                        if line.startswith("PRETTY_NAME="):
+                            pretty_name = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+            except OSError: pass # If os-release can't be read, fall back to default
+
+        if os.path.exists(grub_path):
+            log("Configuring /etc/default/grub...", "info")
+            try:
+                with open(grub_path, 'r') as f: lines = f.readlines()
+                with open(grub_path, 'w') as f:
+                    for line in lines:
+                        if line.strip().startswith("GRUB_DISTRIBUTOR="):
+                            f.write(f"GRUB_DISTRIBUTOR={shlex.quote(pretty_name)}\n")
+                        elif line.strip().startswith("GRUB_CMDLINE_LINUX_DEFAULT="):
+                            # Remove 'quiet' from kernel command line if it exists
+                            f.write(line.replace("quiet", "").replace("  ", " "))
+                        else:
+                            f.write(line)
+            except OSError as e:
+                log(f"Failed to edit grub config: {e}", "warn")
+        
+        # Determine bootloader ID (used for EFI entry name, often matches distro name)
+        # Using the base target_os as the boot_id for consistency, as per your older code.
         bootloader_id = "BlueArchiveLinux" if self.target_os == "bal" else self.args.target.capitalize()
+        
         cmd = ["grub-install", f"--target={'x86_64-efi' if self.uefi else 'i386-pc'}", f"--bootloader-id={bootloader_id}", "--recheck"]
         if self.uefi: cmd.append("--efi-directory=/boot/efi")
         else: cmd.append(self.disk)
