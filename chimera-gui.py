@@ -452,7 +452,6 @@ def build_html(distro_name, logo_uri, hostname):
             const log = document.getElementById('terminal-log');
             log.appendChild(document.createTextNode(text));
 
-            // DOM memory pruner to keep memory low while preserving responsiveness
             while (log.childNodes.length > 200) {{
                 log.removeChild(log.firstChild);
             }}
@@ -562,6 +561,9 @@ class BackendBridge(QObject):
 
     def build_command(self, state):
         cmd = ["python3", "-u", BACKEND_SCRIPT]
+
+        # FIX: EXPLICITLY PASS DISK MODE (AUTO / MANUAL)
+        cmd.extend(["--disk-mode", state['disk_mode']])
 
         if state['disk_mode'] == 'auto':
             if state.get('disk'): cmd.extend(["--disk", state['disk']])
@@ -710,7 +712,6 @@ class InstallerWindow(QMainWindow):
         self.view.page().runJavaScript(js_code)
 
 if __name__ == "__main__":
-    # GPU Acceleration enabled for smooth UI glassmorphism/spring transitions
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --use-gl=egl --ignore-gpu-blocklist --enable-gpu-rasterization"
     app = QApplication(sys.argv)
     win = InstallerWindow()
