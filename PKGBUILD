@@ -9,7 +9,6 @@ license=('MIT')
 depends=('python' 'pyside6')
 makedepends=()
 
-# If you are building this locally inside the Chimera folder, you can just use local sources:
 source=("local://chimera.py"
   "local://chimera-gui.py"
   "local://logo.png"
