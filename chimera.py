@@ -268,14 +268,15 @@ class ChimeraInstaller:
             f.write("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
 
     def _setup_kernel_initramfs(self):
-        log("Offline Mode: Extracting Kernel and Rebuilding Initramfs...", "warn")
-        kernel_name = self.args.kernel
-        kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-{kernel_name}"
+        log("Seeding Kernel and sanitizing mkinitcpio...", "warn")
+        
+        # We must ALWAYS seed standard 'linux' so clone-based presets don't fail pacman hooks.
+        kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-linux"
         os.makedirs(os.path.dirname(kernel_dst), exist_ok=True)
         
         search_patterns = [
             "/usr/lib/modules/*/vmlinuz", 
-            f"/boot/vmlinuz-{kernel_name}", 
+            "/boot/vmlinuz-linux", 
             "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux"
         ]
         
@@ -296,7 +297,7 @@ class ChimeraInstaller:
             shutil.copy(kernel_src, kernel_dst)
             os.chmod(kernel_dst, 0o644)
         else:
-            raise RuntimeError("CRITICAL: Kernel not found! Cannot proceed with initramfs creation.")
+            log("Warning: Kernel not found! Pacman hooks might fail.", "warn")
 
         log("Sanitizing mkinitcpio presets...", "info")
         preset_dir = f"{MOUNT_POINT}/etc/mkinitcpio.d"
@@ -304,8 +305,10 @@ class ChimeraInstaller:
             for preset in glob.glob(f"{preset_dir}/*.preset"):
                 try:
                     with open(preset, 'r') as f: content = f.read()
-                    if "archiso.conf" in content:
+                    if "archiso" in content:
                         content = content.replace("/etc/mkinitcpio.conf.d/archiso.conf", "/etc/mkinitcpio.conf")
+                        content = content.replace("'archiso'", "")
+                        content = content.replace('"archiso"', "")
                         with open(preset, 'w') as f: f.write(content)
                 except OSError as e: log(f"Failed to clean up {preset}: {e}", "warn")
 
@@ -330,8 +333,8 @@ class ChimeraInstaller:
         if os.path.exists(archiso_conf):
             os.remove(archiso_conf)
 
-        log("Rebuilding initramfs...", "info")
-        self.run_cmd(["mkinitcpio", "-P"], chroot=True, stream=True)
+        log("Rebuilding base initramfs...", "info")
+        self.run_cmd(["mkinitcpio", "-P"], chroot=True, stream=True, check=False)
 
     def configure_system(self):
         set_progress(75, "Configuring System...")
@@ -377,6 +380,11 @@ class ChimeraInstaller:
 
         self.run_cmd(["systemctl", "enable", "NetworkManager"], chroot=True, check=False)
 
+        # --- FIX APPLIED HERE ---
+        # We must seed the kernel and fix mkinitcpio presets BEFORE pacman runs
+        # otherwise hooks triggered by pacman installations/updates will crash.
+        self._setup_kernel_initramfs()
+
         # Packages Setup
         pkgs = []
         if self.args.kernel and self.args.kernel != "linux":
@@ -399,13 +407,9 @@ class ChimeraInstaller:
         # [FIX] Force removal of conflicting jack/jack2 AFTER the system update.
         if self.args.audio == "pipewire": 
             log("Removing legacy audio packages to prevent Pipewire conflicts...", "info")
-            # Remove jack2 first (this is the real package; jack2 provides jack)
             self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack2"], chroot=True, check=False)
-            # Remove jack separately (may not exist as standalone package)
             self.run_cmd(["pacman", "-Rdd", "--noconfirm", "jack"], chroot=True, check=False)
-            # Remove pipewire-jack in case of a previous partial install
             self.run_cmd(["pacman", "-Rdd", "--noconfirm", "pipewire-jack"], chroot=True, check=False)
-            # Remove pulseaudio packages since pipewire-pulse replaces them
             self.run_cmd(["pacman", "-Rdd", "--noconfirm", "pulseaudio"], chroot=True, check=False)
             self.run_cmd(["pacman", "-Rdd", "--noconfirm", "pulseaudio-alsa"], chroot=True, check=False)
             self.run_cmd(["pacman", "-Rdd", "--noconfirm", "pipewire-pulse"], chroot=True, check=False)
@@ -416,10 +420,6 @@ class ChimeraInstaller:
             else:
                 log("Offline Mode: Installing packages from local cache...", "info")
                 self.run_cmd(["pacman", "-S", "--noconfirm", "--needed"] + pkgs, chroot=True, check=False)
-
-        # --- RE-ADDED KERNEL / INITRAMFS LOGIC ---
-        if not self.args.online or self.target_os == "bal":
-            self._setup_kernel_initramfs()
 
         # Services
         if self.args.zram:
