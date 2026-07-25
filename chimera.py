@@ -267,6 +267,72 @@ class ChimeraInstaller:
         with open(resolv_path, "w") as f:
             f.write("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
 
+    def _setup_kernel_initramfs(self):
+        log("Offline Mode: Extracting Kernel and Rebuilding Initramfs...", "warn")
+        kernel_name = self.args.kernel
+        kernel_dst = f"{MOUNT_POINT}/boot/vmlinuz-{kernel_name}"
+        os.makedirs(os.path.dirname(kernel_dst), exist_ok=True)
+        
+        search_patterns = [
+            "/usr/lib/modules/*/vmlinuz", 
+            f"/boot/vmlinuz-{kernel_name}", 
+            "/run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux"
+        ]
+        
+        def kernel_version(path):
+            match = re.search(r'(\d+)\.(\d+)\.(\d+)', path)
+            return tuple(map(int, match.groups())) if match else (0,0,0)
+
+        kernel_src = None
+        for pattern in search_patterns:
+            matches = glob.glob(pattern)
+            if matches:
+                matches.sort(key=kernel_version, reverse=True)
+                kernel_src = matches[0]
+                break
+        
+        if kernel_src and os.path.exists(kernel_src):
+            log(f"Found kernel: {kernel_src}", "success")
+            shutil.copy(kernel_src, kernel_dst)
+            os.chmod(kernel_dst, 0o644)
+        else:
+            raise RuntimeError("CRITICAL: Kernel not found! Cannot proceed with initramfs creation.")
+
+        log("Sanitizing mkinitcpio presets...", "info")
+        preset_dir = f"{MOUNT_POINT}/etc/mkinitcpio.d"
+        if os.path.exists(preset_dir):
+            for preset in glob.glob(f"{preset_dir}/*.preset"):
+                try:
+                    with open(preset, 'r') as f: content = f.read()
+                    if "archiso.conf" in content:
+                        content = content.replace("/etc/mkinitcpio.conf.d/archiso.conf", "/etc/mkinitcpio.conf")
+                        with open(preset, 'w') as f: f.write(content)
+                except OSError as e: log(f"Failed to clean up {preset}: {e}", "warn")
+
+        conf_path = f"{MOUNT_POINT}/etc/mkinitcpio.conf"
+        if os.path.exists(conf_path):
+            try:
+                with open(conf_path, 'r') as f: config_data = f.read()
+                if "archiso" in config_data:
+                    std_hooks = 'HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block filesystems fsck)'
+                    lines = config_data.splitlines()
+                    new_lines = []
+                    for line in lines:
+                        if line.strip().startswith("HOOKS") and "archiso" in line:
+                            new_lines.append(f"# {line}")
+                            new_lines.append(std_hooks)
+                        else:
+                            new_lines.append(line)
+                    with open(conf_path, 'w') as f: f.write("\n".join(new_lines))
+            except OSError as e: log(f"Failed to reset mkinitcpio HOOKS: {e}", "warn")
+
+        archiso_conf = f"{MOUNT_POINT}/etc/mkinitcpio.conf.d/archiso.conf"
+        if os.path.exists(archiso_conf):
+            os.remove(archiso_conf)
+
+        log("Rebuilding initramfs...", "info")
+        self.run_cmd(["mkinitcpio", "-P"], chroot=True, stream=True)
+
     def configure_system(self):
         set_progress(75, "Configuring System...")
         log("Configuring System Locale & Time...", "info")
@@ -331,15 +397,6 @@ class ChimeraInstaller:
             self.run_cmd(["pacman", "-Syuu", "--noconfirm"], chroot=True)
 
         # [FIX] Force removal of conflicting jack/jack2 AFTER the system update.
-        #
-        # BUG: The original code ran "pacman -Rdd jack jack2" as a single command.
-        # On Arch Linux, jack2 PROVIDES jack, so "jack" is usually NOT a standalone
-        # package. When pacman encounters "target not found: jack", it aborts the
-        # ENTIRE transaction, leaving jack2 still installed. Then "pacman -S pipewire-jack"
-        # fails with "unresolvable package conflicts detected" because jack2 is still present.
-        #
-        # FIX: Remove each conflicting package SEPARATELY so that a "target not found"
-        # error on one package does not prevent removal of the others.
         if self.args.audio == "pipewire": 
             log("Removing legacy audio packages to prevent Pipewire conflicts...", "info")
             # Remove jack2 first (this is the real package; jack2 provides jack)
@@ -359,6 +416,10 @@ class ChimeraInstaller:
             else:
                 log("Offline Mode: Installing packages from local cache...", "info")
                 self.run_cmd(["pacman", "-S", "--noconfirm", "--needed"] + pkgs, chroot=True, check=False)
+
+        # --- RE-ADDED KERNEL / INITRAMFS LOGIC ---
+        if not self.args.online or self.target_os == "bal":
+            self._setup_kernel_initramfs()
 
         # Services
         if self.args.zram:
