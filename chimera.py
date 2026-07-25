@@ -49,7 +49,13 @@ class ChimeraInstaller:
         self.debug = args.debug
         self.uefi = os.path.exists("/sys/firmware/efi")
         self.target_os = args.target.lower()
-        self.disk = args.disk if args.disk else self._detect_disk(args.rootfs)
+
+        # SAFETY HARDENING: Force manual mode if rootfs is supplied or if disk-mode is manual
+        if self.args.rootfs or self.args.disk_mode == "manual":
+            self.args.disk_mode = "manual"
+            self.disk = self.args.disk if self.args.disk else self._detect_disk(args.rootfs)
+        else:
+            self.disk = self.args.disk
 
         self.root_pass = os.environ.get("CHIMERA_ROOT_PASS", "")
         self.user_pass = os.environ.get("CHIMERA_USER_PASS", "")
@@ -60,7 +66,7 @@ class ChimeraInstaller:
                 sys.exit(f"{COLORS['FAIL']}Error: Invalid timezone path.{COLORS['ENDC']}")
 
         if self.args.swap:
-            if self.args.disk:
+            if self.args.disk_mode == "auto":
                 if not re.match(r"^\d+[MGmg]$", self.args.swap):
                     sys.exit(f"{COLORS['FAIL']}Error: --swap must be a size (e.g. 2G, 512M) in auto-partition mode.{COLORS['ENDC']}")
             else:
@@ -68,7 +74,7 @@ class ChimeraInstaller:
                     sys.exit(f"{COLORS['FAIL']}Error: Swap partition {self.args.swap} not found.{COLORS['ENDC']}")
 
         if not self.disk and not self.uefi:
-            sys.exit(f"{COLORS['FAIL']}Error: Could not detect root disk for BIOS bootloader. Please provide --disk.{COLORS['ENDC']}")
+            sys.exit(f"{COLORS['FAIL']}Error: Could not detect target disk for BIOS bootloader.{COLORS['ENDC']}")
 
     def run_cmd(self, cmd, shell=False, check=True, chroot=False, env=None, stream=False, input_data=None):
         show_output = stream or self.debug
@@ -117,6 +123,25 @@ class ChimeraInstaller:
         except subprocess.CalledProcessError:
             return None
 
+    def is_host_disk(self, target_path):
+        """Prevents modifying active live USB or active host system partition."""
+        try:
+            if not target_path or not os.path.exists(target_path): return False
+            root_src = subprocess.check_output(["findmnt", "/", "-o", "SOURCE", "-n"], stderr=subprocess.DEVNULL).decode().strip()
+            if not root_src: return False
+            
+            root_real = os.path.realpath(root_src)
+            target_real = os.path.realpath(target_path)
+            
+            if root_real == target_real: return True
+            
+            parent = subprocess.check_output(["lsblk", "-no", "pkname", root_real], stderr=subprocess.DEVNULL).decode().strip()
+            if parent and os.path.realpath(f"/dev/{parent}") == target_real:
+                return True
+        except Exception:
+            pass
+        return False
+
     def tools_check(self):
         tools = ["parted", "wipefs", "mkfs.ext4", "rsync", "lsblk", "mount", "umount", "findmnt", "partprobe", "udevadm"]
         if self.uefi: 
@@ -164,13 +189,19 @@ class ChimeraInstaller:
                 raise RuntimeError("No Internet Connection. Required for Online mode.")
 
     def partition_handler(self):
-        set_progress(20, "Partitioning Disk...")
+        set_progress(20, "Preparing Partitions...")
         log("Preparing Partitions...", "info")
         
         if os.path.exists(MOUNT_POINT) and os.path.ismount(MOUNT_POINT):
             self.run_cmd(["umount", "-R", MOUNT_POINT], check=False)
         
+        # --- AUTO PARTITION MODE ---
         if self.args.disk_mode == "auto":
+            if not self.args.disk:
+                sys.exit(f"{COLORS['FAIL']}Error: Auto mode requires an explicit target disk (--disk).{COLORS['ENDC']}")
+            if self.is_host_disk(self.args.disk) and not self.args.i_am_very_stupid:
+                sys.exit(f"{COLORS['FAIL']}CRITICAL SAFETY BLOCKS AUTOMATED WIPE ON LIVE HOST DISK!{COLORS['ENDC']}")
+
             try:
                 swaps = subprocess.check_output(["lsblk", "-nlo", "NAME,FSTYPE", self.args.disk], stderr=subprocess.DEVNULL).decode().splitlines()
                 for line in swaps:
@@ -178,27 +209,37 @@ class ChimeraInstaller:
                     if len(parts) >= 2 and parts[1] == "swap":
                         self.run_cmd(["swapoff", f"/dev/{parts[0].strip()}"], check=False)
             except Exception: pass
+            
             self._auto_partition_disk()
+
+        # --- MANUAL PARTITION MODE ---
         else:
+            log("Manual Partitioning Mode Active. Disk wipe disabled.", "info")
+            if not self.args.rootfs:
+                sys.exit(f"{COLORS['FAIL']}Error: Root partition (--rootfs) is required in manual mode.{COLORS['ENDC']}")
+
+            if self.is_host_disk(self.args.rootfs) and not self.args.i_am_very_stupid:
+                sys.exit(f"{COLORS['FAIL']}CRITICAL SAFETY BLOCKS FORMATTING OF ACTIVE HOST/LIVE DISK!{COLORS['ENDC']}")
+
             if self.args.swap:
                 self.run_cmd(["swapoff", self.args.swap], check=False)
 
-        if not self.args.rootfs:
-            sys.exit(f"{COLORS['FAIL']}Error: Root partition (--rootfs) is required in manual mode.{COLORS['ENDC']}")
-
-        self.run_cmd(["mkfs.ext4", "-F", self.args.rootfs])
-        os.makedirs(MOUNT_POINT, exist_ok=True)
-        self.run_cmd(["mount", self.args.rootfs, MOUNT_POINT])
-        
-        if self.args.boot:
-            path = f"{MOUNT_POINT}/boot/efi" if self.uefi else f"{MOUNT_POINT}/boot"
-            os.makedirs(path, exist_ok=True)
-            if self.uefi: self.run_cmd(["mkfs.vfat", "-F32", self.args.boot])
-            else: self.run_cmd(["mkfs.ext4", "-F", self.args.boot])
-            self.run_cmd(["mount", self.args.boot, path])
-        
-        if self.args.swap:
-            self.run_cmd(["mkswap", self.args.swap])
+            log(f"Formatting root partition {self.args.rootfs} as ext4...", "info")
+            self.run_cmd(["mkfs.ext4", "-F", self.args.rootfs])
+            os.makedirs(MOUNT_POINT, exist_ok=True)
+            self.run_cmd(["mount", self.args.rootfs, MOUNT_POINT])
+            
+            if self.args.boot:
+                path = f"{MOUNT_POINT}/boot/efi" if self.uefi else f"{MOUNT_POINT}/boot"
+                os.makedirs(path, exist_ok=True)
+                if self.uefi: 
+                    self.run_cmd(["mkfs.vfat", "-F32", self.args.boot])
+                else: 
+                    self.run_cmd(["mkfs.ext4", "-F", self.args.boot])
+                self.run_cmd(["mount", self.args.boot, path])
+            
+            if self.args.swap:
+                self.run_cmd(["mkswap", self.args.swap])
 
     def _auto_partition_disk(self):
         log(f"Wiping and partitioning {self.args.disk}...", "warn")
